@@ -1,0 +1,26 @@
+{
+  "stream_url": "rtsp://admin:cctv%401234@192.168.0.229:554/unicast/c11/s1/live",
+  "line": [
+    9,
+    113,
+    203,
+    135
+  ],
+  "counts": {
+    "in": 0,
+    "out": 0
+  },
+  "conf_thresh": 0.5,
+  "flip_sides": false,
+  "motion_thresh": 500,
+  "target_size": 320,
+  "capture_dir": "captures",
+  "max_captures": 1000,
+  "model_path": "models/yolo26n_ncnn_model",
+  "enabled_classes": [
+    2,
+    3,
+    5,
+    7
+  ]
+}

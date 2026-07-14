@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+*.log
+captures/
+*.jpg
+*.png
+models/yolo26n.pt
+models/yolo26n.onnx
+rust_port/target/
+rust_port/config.json
