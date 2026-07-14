@@ -218,7 +218,7 @@ function applyStream() {
 
 function flipSides() {
   fetch('/api/config').then(r=>r.json()).then(d=>{
-    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({flip_sides:!d.flip_sides})}).then(()=>location.reload());
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({flip_sides:!d.flip_sides})});
   });
 }
 

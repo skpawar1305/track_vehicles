@@ -11,12 +11,12 @@
     "out": 0
   },
   "conf_thresh": 0.5,
-  "flip_sides": false,
+  "flip_sides": true,
   "motion_thresh": 500,
-  "target_size": 320,
   "capture_dir": "captures",
   "max_captures": 1000,
   "model_path": "models/yolo26n_ncnn_model",
+  "target_size": 320,
   "enabled_classes": [
     2,
     3,
