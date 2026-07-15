@@ -202,7 +202,6 @@ async fn api_captures_delete(state: web::Data<Arc<AppState>>, body: web::Json<Va
 async fn api_reset(state: web::Data<Arc<AppState>>) -> HttpResponse {
     state.count_in.store(0, Ordering::Relaxed);
     state.count_out.store(0, Ordering::Relaxed);
-    crate::config::persist_counts(state.get_ref());
     HttpResponse::Ok().json(json!({"status": "ok"}))
 }
 

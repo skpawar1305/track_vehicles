@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,23 +73,30 @@ pub struct AppState {
     pub count_out: AtomicUsize,
 }
 
+fn count_images(dir: &str, suffix: &str) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+    let names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.iter().filter(|n| n.ends_with(".jpg") && n.contains(suffix)).count()
+}
+
 impl AppState {
     pub fn new(config_path: &str) -> Self {
         let cfg = Config::load(config_path);
+        let (c_in, c_out) = if Path::new(&cfg.capture_dir).exists() {
+            (count_images(&cfg.capture_dir, "_in"), count_images(&cfg.capture_dir, "_out"))
+        } else {
+            (cfg.counts.in_count, cfg.counts.out)
+        };
         Self {
-            count_in: AtomicUsize::new(cfg.counts.in_count),
-            count_out: AtomicUsize::new(cfg.counts.out),
+            count_in: AtomicUsize::new(c_in),
+            count_out: AtomicUsize::new(c_out),
             config: RwLock::new(cfg),
             config_path: config_path.into(),
             frame_buffer: RwLock::new(None),
             viewers: RwLock::new(0),
         }
     }
-}
-
-pub fn persist_counts(state: &AppState) {
-    let mut cfg = state.config.write().unwrap();
-    cfg.counts.in_count = state.count_in.load(Ordering::Relaxed);
-    cfg.counts.out = state.count_out.load(Ordering::Relaxed);
-    cfg.save(&state.config_path);
 }
