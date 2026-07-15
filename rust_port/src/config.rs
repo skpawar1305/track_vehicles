@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -68,16 +69,30 @@ pub struct AppState {
     pub config_path: String,
     pub frame_buffer: RwLock<Option<Vec<u8>>>,
     pub viewers: RwLock<u32>,
+    pub count_in: AtomicUsize,
+    pub count_out: AtomicUsize,
 }
 
 impl AppState {
     pub fn new(config_path: &str) -> Self {
         let cfg = Config::load(config_path);
         Self {
+            count_in: AtomicUsize::new(cfg.counts.in_count),
+            count_out: AtomicUsize::new(cfg.counts.out),
             config: RwLock::new(cfg),
             config_path: config_path.into(),
             frame_buffer: RwLock::new(None),
             viewers: RwLock::new(0),
         }
     }
+}
+
+pub fn spawn_persist(state: Arc<AppState>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        let mut cfg = state.config.write().unwrap();
+        cfg.counts.in_count = state.count_in.load(Ordering::Relaxed);
+        cfg.counts.out = state.count_out.load(Ordering::Relaxed);
+        cfg.save(&state.config_path);
+    });
 }

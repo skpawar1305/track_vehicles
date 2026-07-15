@@ -10,6 +10,7 @@ mod server;
 mod types;
 mod detector;
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 use config::AppState;
@@ -30,6 +31,7 @@ const FRAME_SKIP: u32 = 1;
 
 fn main() -> Result<(), String> {
     let state = Arc::new(AppState::new("config.json"));
+    config::spawn_persist(state.clone());
 
     let server_state = state.clone();
     std::thread::spawn(move || {
@@ -115,23 +117,8 @@ fn main() -> Result<(), String> {
         };
         let _track_ids = tracker.update(detections);
 
-        let cap_dir = &cfg.capture_dir;
-        let c_in = std::path::Path::new(cap_dir).exists().then(|| {
-            std::fs::read_dir(cap_dir).ok().map(|entries| {
-                entries.filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().map(|ext| ext == "jpg").unwrap_or(false))
-                    .filter(|e| e.file_name().to_string_lossy().contains("_in"))
-                    .count()
-            }).unwrap_or(0)
-        }).unwrap_or(0);
-        let c_out = std::path::Path::new(cap_dir).exists().then(|| {
-            std::fs::read_dir(cap_dir).ok().map(|entries| {
-                entries.filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().map(|ext| ext == "jpg").unwrap_or(false))
-                    .filter(|e| e.file_name().to_string_lossy().contains("_out"))
-                    .count()
-            }).unwrap_or(0)
-        }).unwrap_or(0);
+        let c_in = state.count_in.load(Ordering::Relaxed);
+        let c_out = state.count_out.load(Ordering::Relaxed);
 
         if let Some(line) = cfg.line {
             annotate::draw_line(&mut mat, &line, cfg.flip_sides);

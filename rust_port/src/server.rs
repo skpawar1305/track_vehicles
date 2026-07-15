@@ -1,4 +1,5 @@
 use actix_web::{web, App, HttpServer, HttpResponse, get, post};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::fs;
 use crate::config::AppState;
@@ -116,16 +117,8 @@ async fn api_config_post(state: web::Data<Arc<AppState>>, body: web::Json<Value>
 
 #[get("/api/counts")]
 async fn api_counts(state: web::Data<Arc<AppState>>) -> HttpResponse {
-    let cfg = state.config.read().unwrap();
-    let cap_dir = cfg.capture_dir.clone();
-    let (mut c_in, mut c_out) = (0, 0);
-    if let Ok(entries) = fs::read_dir(&cap_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with("_in.jpg") { c_in += 1; }
-            else if name.ends_with("_out.jpg") { c_out += 1; }
-        }
-    }
+    let c_in = state.count_in.load(Ordering::Relaxed);
+    let c_out = state.count_out.load(Ordering::Relaxed);
     HttpResponse::Ok().json(json!({"in": c_in, "out": c_out}))
 }
 
@@ -207,10 +200,8 @@ async fn api_captures_delete(state: web::Data<Arc<AppState>>, body: web::Json<Va
 
 #[post("/api/reset")]
 async fn api_reset(state: web::Data<Arc<AppState>>) -> HttpResponse {
-    let mut cfg = state.config.write().unwrap();
-    cfg.counts = crate::config::Counts { in_count: 0, out: 0 };
-    drop(cfg);
-    state.config.write().unwrap().save(&state.config_path);
+    state.count_in.store(0, Ordering::Relaxed);
+    state.count_out.store(0, Ordering::Relaxed);
     HttpResponse::Ok().json(json!({"status": "ok"}))
 }
 
