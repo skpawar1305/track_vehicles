@@ -74,6 +74,17 @@ cargo build --release
 ./target/release/vehicle_counter
 ```
 
+### Test with a YouTube video
+
+```bash
+cd test
+./run_test.sh
+# or with a specific video:
+./run_test.sh "https://www.youtube.com/watch?v=MNn9qKG2UFI"
+```
+
+The script uses `yt-dlp` to extract a direct stream URL, writes a config, and starts the server. Open `http://localhost:5000`, draw a counting line, and watch it count.
+
 ### Config
 
 The same `config.json` from the Python version is used. Copy it alongside the binary:
@@ -143,6 +154,27 @@ RTSP → opencv::VideoCapture → motion gate → [ncnn stub] → ByteTrack → 
 | 5 | Bus | ✓ |
 | 7 | Truck | ✓ |
 | 1 | Bicycle | ✗ (can enable via UI) |
+
+## Testing
+
+Run unit tests:
+```bash
+cd rust_port
+LIBCLANG_PATH=/home/skpawar1305/robostack/.pixi/envs/humble/lib cargo test
+```
+
+Run integration test with a YouTube video:
+```bash
+cd test
+./run_test.sh "https://www.youtube.com/watch?v=MNn9qKG2UFI"
+```
+
+Then test API endpoints:
+```bash
+curl http://localhost:5000/api/counts     # {"in":0,"out":0}
+curl http://localhost:5000/api/config     # current configuration
+curl http://localhost:5000/api/line       # {"line": null} until you draw one
+```
 
 ## License
 

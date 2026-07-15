@@ -231,3 +231,101 @@ impl ByteTrack {
         self.objects.keys().copied().collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Detection;
+
+    #[test]
+    fn test_iou_overlap() {
+        let a = [0, 0, 100, 100];
+        let b = [50, 50, 150, 150];
+        let i = iou(&a, &b);
+        assert!(i > 0.0 && i < 1.0);
+    }
+
+    #[test]
+    fn test_iou_no_overlap() {
+        let a = [0, 0, 10, 10];
+        let b = [100, 100, 110, 110];
+        let i = iou(&a, &b);
+        assert!(i < 0.01);
+    }
+
+    #[test]
+    fn test_iou_identical() {
+        let a = [0, 0, 100, 100];
+        let i = iou(&a, &a);
+        assert!((i - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_tracker_empty_detections() {
+        let mut tracker = ByteTrack::new(0.5);
+        let ids = tracker.update(vec![]);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_tracker_new_detection() {
+        let mut tracker = ByteTrack::new(0.5);
+        let det = Detection {
+            bbox: [0, 0, 50, 50],
+            centroid: (25, 25),
+            confidence: 0.9,
+            class_id: 2,
+            label: "car".into(),
+        };
+        let ids = tracker.update(vec![det]);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(tracker.objects.len(), 1);
+    }
+
+    #[test]
+    fn test_tracker_matching() {
+        let mut tracker = ByteTrack::new(0.5);
+        let det = Detection {
+            bbox: [0, 0, 50, 50],
+            centroid: (25, 25),
+            confidence: 0.9,
+            class_id: 2,
+            label: "car".into(),
+        };
+        tracker.update(vec![det.clone()]);
+        // Same position, should match existing track
+        let ids = tracker.update(vec![det]);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(tracker.objects.len(), 1);
+    }
+
+    #[test]
+    fn test_tracker_disappear() {
+        let mut tracker = ByteTrack::new(0.5);
+        tracker.max_lost = 2;
+        let det = Detection {
+            bbox: [0, 0, 50, 50],
+            centroid: (25, 25),
+            confidence: 0.9,
+            class_id: 2,
+            label: "car".into(),
+        };
+        tracker.update(vec![det]);
+        tracker.update(vec![]); // 1 missed
+        tracker.update(vec![]); // 2 missed
+        let ids = tracker.update(vec![]); // 3 missed > max_lost
+        assert!(ids.is_empty());
+        assert!(tracker.objects.is_empty());
+    }
+
+    #[test]
+    fn test_greedy_match() {
+        let mut cost = vec![vec![0.1f32, 0.8f32], vec![0.9f32, 0.2f32]];
+        let (mt, md, pairs) = greedy_match(&mut cost, 0.5);
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.contains(&(0, 0)));
+        assert!(pairs.contains(&(1, 1)));
+        assert!(mt.iter().all(|&x| x));
+        assert!(md.iter().all(|&x| x));
+    }
+}

@@ -35,6 +35,8 @@ impl Detector {
             onnx_path
         } else if std::path::Path::new("models/yolo26n.onnx").exists() {
             "models/yolo26n.onnx".to_string()
+        } else if std::path::Path::new("../models/yolo26n.onnx").exists() {
+            "../models/yolo26n.onnx".to_string()
         } else {
             return Err("No ONNX model found".into());
         };

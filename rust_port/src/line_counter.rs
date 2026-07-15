@@ -31,3 +31,50 @@ pub fn detect_crossing(
     }
     Crossing::None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cross_product() {
+        // Line from (0,0) to (100,0), point (50, 10) below the line
+        let cp = cross_product(0, 0, 100, 0, 50, 10);
+        assert!(cp > 0);
+    }
+
+    #[test]
+    fn test_which_side() {
+        let line = [0, 180, 640, 180]; // horizontal line at y=180
+        assert_eq!(which_side(&line, (100, 0)), -1);   // above (smaller y)
+        assert_eq!(which_side(&line, (100, 360)), 1);  // below (larger y)
+    }
+
+    #[test]
+    fn test_detect_crossing_none() {
+        let line = [0, 180, 640, 180];
+        assert_eq!(detect_crossing(&line, (100, 0), (100, 50), false), Crossing::None);
+    }
+
+    #[test]
+    fn test_detect_crossing_in() {
+        let line = [0, 180, 640, 180];
+        // above (-1) -> below (1) = IN (new_side=1 -> In)
+        assert_eq!(detect_crossing(&line, (100, 0), (100, 360), false), Crossing::In);
+    }
+
+    #[test]
+    fn test_detect_crossing_out() {
+        let line = [0, 180, 640, 180];
+        // below (1) -> above (-1) = OUT (new_side=-1 -> Out)
+        assert_eq!(detect_crossing(&line, (100, 360), (100, 0), false), Crossing::Out);
+    }
+
+    #[test]
+    fn test_detect_crossing_flip() {
+        let line = [0, 180, 640, 180];
+        // flip swaps IN/OUT
+        assert_eq!(detect_crossing(&line, (100, 360), (100, 0), true), Crossing::In);
+        assert_eq!(detect_crossing(&line, (100, 0), (100, 360), true), Crossing::Out);
+    }
+}
