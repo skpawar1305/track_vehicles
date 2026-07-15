@@ -4,6 +4,7 @@ __pycache__/
 .env
 *.log
 captures/
+test_captures/
 *.jpg
 *.png
 models/yolo26n.pt
