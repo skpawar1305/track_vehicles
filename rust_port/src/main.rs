@@ -42,7 +42,7 @@ fn main() -> Result<(), String> {
 
     std::thread::sleep(std::time::Duration::from_secs(1));
 
-    let detector = detector::Detector::new(
+    let mut detector = detector::Detector::new(
         &state.config.read().unwrap().model_path,
         state.config.read().unwrap().target_size,
     ).ok();
@@ -59,6 +59,9 @@ fn main() -> Result<(), String> {
             motion.update_line(line);
         }
     }
+
+    // Track which trackers have already triggered a crossing
+    let mut crossed: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
     let mut frame_count: u32 = 0;
     let mut fps_timer = Instant::now();
@@ -104,10 +107,9 @@ fn main() -> Result<(), String> {
             motion.detect(&mat);
         }
 
-        let detections: Vec<Detection> = if let Some(ref det) = detector {
+        let detections: Vec<Detection> = if let Some(ref mut det) = detector {
             if motion.motion_state || frame_count % PERIODIC_INTERVAL == 0 {
-                let data = mat.data_bytes().ok().unwrap_or(&[]);
-                det.detect(data, CAPTURE_WIDTH, CAPTURE_HEIGHT)
+                det.detect(&mat, &cfg.enabled_classes)
             } else {
                 vec![]
             }
@@ -115,6 +117,40 @@ fn main() -> Result<(), String> {
             vec![]
         };
         let _track_ids = tracker.update(detections);
+
+        // Line crossing detection
+        if let Some(line) = cfg.line {
+            let mut to_cross: Vec<(u32, line_counter::Crossing)> = Vec::new();
+            for (&tid, obj) in &tracker.objects {
+                if crossed.contains(&tid) {
+                    continue;
+                }
+                if obj.centroids.len() >= 2 {
+                    let n = obj.centroids.len();
+                    let old = obj.centroids[n - 2];
+                    let new = obj.centroids[n - 1];
+                    let cross = line_counter::detect_crossing(&line, old, new, cfg.flip_sides);
+                    if cross != line_counter::Crossing::None {
+                        to_cross.push((tid, cross));
+                    }
+                }
+            }
+            for (tid, cross) in &to_cross {
+                crossed.insert(*tid);
+                match cross {
+                    line_counter::Crossing::In => {
+                        state.count_in.fetch_add(1, Ordering::Relaxed);
+                    }
+                    line_counter::Crossing::Out => {
+                        state.count_out.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Clean crossed set of dead tracks
+        crossed.retain(|tid| tracker.objects.contains_key(tid));
 
         let c_in = state.count_in.load(Ordering::Relaxed);
         let c_out = state.count_out.load(Ordering::Relaxed);
