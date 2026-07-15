@@ -21,6 +21,7 @@ use types::Detection;
 use opencv::{
     core,
     imgcodecs,
+    imgproc,
     prelude::*,
 };
 
@@ -28,6 +29,36 @@ const CAPTURE_WIDTH: u32 = 640;
 const CAPTURE_HEIGHT: u32 = 360;
 const PERIODIC_INTERVAL: u32 = 30;
 const FRAME_SKIP: u32 = 1;
+
+fn save_capture(mat: &core::Mat, cap_dir: &str, direction: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let ts = format!("d{}", now.as_millis());
+    let name = format!("{}/{}_{}.jpg", cap_dir, ts, direction);
+
+    std::fs::create_dir_all(cap_dir).ok();
+    let mut buf = core::Vector::<u8>::new();
+    let params = core::Vector::<i32>::new();
+    if imgcodecs::imencode(".jpg", mat, &mut buf, &params).ok().unwrap_or(false) {
+        std::fs::write(&name, buf.to_vec()).ok();
+    }
+
+    // Thumbnail
+    let thumb_dir = format!("{}/thumb", cap_dir);
+    std::fs::create_dir_all(&thumb_dir).ok();
+    let (w, h) = (mat.cols(), mat.rows());
+    let tw = 160i32;
+    let th = (h as f64 * tw as f64 / w as f64) as i32;
+    if th > 0 {
+        let mut small = core::Mat::default();
+        imgproc::resize(mat, &mut small, core::Size::new(tw, th), 0.0, 0.0, imgproc::INTER_LINEAR).ok();
+        let mut sbuf = core::Vector::<u8>::new();
+        if imgcodecs::imencode(".jpg", &small, &mut sbuf, &params).ok().unwrap_or(false) {
+            std::fs::write(&format!("{}/{}", thumb_dir, name), sbuf.to_vec()).ok();
+        }
+    }
+}
 
 fn main() -> Result<(), String> {
     let state = Arc::new(AppState::new("config.json"));
@@ -60,7 +91,6 @@ fn main() -> Result<(), String> {
         }
     }
 
-    // Track which trackers have already triggered a crossing
     let mut crossed: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
     let mut frame_count: u32 = 0;
@@ -118,7 +148,9 @@ fn main() -> Result<(), String> {
         };
         let _track_ids = tracker.update(detections);
 
-        // Line crossing detection
+        let mut did_cross = false;
+        let mut cross_dir = String::new();
+
         if let Some(line) = cfg.line {
             let mut to_cross: Vec<(u32, line_counter::Crossing)> = Vec::new();
             for (&tid, obj) in &tracker.objects {
@@ -137,19 +169,24 @@ fn main() -> Result<(), String> {
             }
             for (tid, cross) in &to_cross {
                 crossed.insert(*tid);
-                match cross {
+                let d = match cross {
                     line_counter::Crossing::In => {
                         state.count_in.fetch_add(1, Ordering::Relaxed);
+                        "in"
                     }
                     line_counter::Crossing::Out => {
                         state.count_out.fetch_add(1, Ordering::Relaxed);
+                        "out"
                     }
-                    _ => {}
+                    _ => continue,
+                };
+                if !did_cross {
+                    did_cross = true;
+                    cross_dir = d.to_string();
                 }
             }
         }
 
-        // Clean crossed set of dead tracks
         crossed.retain(|tid| tracker.objects.contains_key(tid));
 
         let c_in = state.count_in.load(Ordering::Relaxed);
@@ -165,6 +202,10 @@ fn main() -> Result<(), String> {
             .collect();
         annotate::draw_boxes(&mut mat, &objects);
         annotate::draw_counts(&mut mat, c_in, c_out, current_fps as f32);
+
+        if did_cross {
+            save_capture(&mat, &cfg.capture_dir, &cross_dir);
+        }
 
         if frame_count % FRAME_SKIP == 0 {
             let mut jpeg_buf = core::Vector::<u8>::new();
