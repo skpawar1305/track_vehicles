@@ -5,7 +5,7 @@ RTSP-based vehicle counting with line-crossing detection, YOLO26n inference via 
 ## Features
 
 - **RTSP stream input** — connect to any IP camera or NVR
-- **YOLO26n detection** — lightweight, optimized via ncnn
+- **YOLO26n detection** — lightweight, optimized via ncnn (or motion-only without ncnn)
 - **ByteTrack** — IoU-based multi-object tracking
 - **Motion gate** — only runs inference when motion is detected near the counting line (saves CPU)
 - **Virtual counting line** — draw any angled line on the video; vehicles crossing it are counted
@@ -15,52 +15,74 @@ RTSP-based vehicle counting with line-crossing detection, YOLO26n inference via 
 - **Daily analytics** — `/analytics` page groups captures by day with expandable rows
 - **Capture gallery** — `/captures` page with filterable grid, select & delete
 - **Persistent config** — line position, stream URL, counters all saved to `config.json`
+- **Rust port** — lower memory footprint, suitable for constrained devices (eg. 512 MB RAM)
 
-## Quick Start
+---
 
-### 1. Export the model
+## Python Version (Original)
 
-On a machine with GPU and `ultralytics` installed:
-
-```bash
-cd models
-./convert_yolo26n.sh
-# or manually:
-pip install ultralytics
-yolo export model=yolo26n.pt format=ncnn imgsz=320
-```
-
-Copy the `models/yolo26n_ncnn_model/` directory to the target device.
-
-### 2. Install dependencies
+### Quick Start
 
 ```bash
 pip install -r requirements.txt
-```
-
-### 3. Configure
-
-Edit `config.json`:
-
-```json
-{
-  "stream_url": "rtsp://admin:password@192.168.0.229:554/unicast/c1/s1/live",
-  "line": null,
-  "target_size": 320,
-  "conf_thresh": 0.5,
-  "enabled_classes": [2, 3, 5, 7]
-}
-```
-
-Or configure via the web UI after starting.
-
-### 4. Run
-
-```bash
+# edit config.json with your RTSP URL
 python run.py
 ```
 
 Open `http://<device-ip>:5000` in a browser.
+
+---
+
+## Rust Port (`rust_port/`)
+
+Lower-memory alternative using OpenCV for RTSP capture. Object detection currently runs via motion-gating only (ncnn stub) — line counting, tracking, and the full web UI work without YOLO.
+
+### Dependencies
+
+| Toolchain | Requirement |
+|-----------|-------------|
+| Rust | `rustup target add aarch64-unknown-linux-gnu` |
+| Cross-compiler | `gcc-aarch64-linux-gnu`, `g++-aarch64-linux-gnu` |
+| OpenCV ARM64 libs | Extract from `ghcr.io/hybridgroup/opencv:4.13.0` (see `setup_opencv.sh` in `face_door_unlock` project) |
+| libclang | `LIBCLANG_PATH` must point to a directory containing `libclang.so` |
+
+### Cross-compile for Pi
+
+```bash
+cd rust_port
+bash build_pi.sh
+```
+
+Produces `vehicle_counter_pi/` containing the binary + bundled OpenCV `.so` files.
+
+### Deploy
+
+```bash
+# Copy to device
+scp -r vehicle_counter_pi dietpi@<device-ip>:~/track_vehicles/rust_port/
+
+# On device, run
+cd ~/track_vehicles/rust_port/vehicle_counter_pi
+./run.sh
+```
+
+### Native build (on device)
+
+```bash
+cd rust_port
+cargo build --release
+./target/release/vehicle_counter
+```
+
+### Config
+
+The same `config.json` from the Python version is used. Copy it alongside the binary:
+
+```bash
+cp config.json vehicle_counter_pi/
+```
+
+---
 
 ## Web UI
 
@@ -81,6 +103,8 @@ Open `http://<device-ip>:5000` in a browser.
 
 Check/uncheck vehicle classes in the sidebar to filter which types are tracked.
 
+---
+
 ## Configuration
 
 All settings are stored in `config.json` and can be edited via the web UI:
@@ -94,27 +118,21 @@ All settings are stored in `config.json` and can be edited via the web UI:
 | `flip_sides` | `false` | Swap IN/OUT direction |
 | `enabled_classes` | `[2,3,5,7]` | Active vehicle COCO class IDs |
 
-## Architecture
+---
+
+## Architecture (Rust port)
 
 ```
-RTSP → cap.read() → MOG2 motion gate → YOLO26n (ncnn) → ByteTrack → line-crossing check → capture save
+RTSP → opencv::VideoCapture → motion gate → [ncnn stub] → ByteTrack → line-crossing check → capture save
                                                                                                     ↓
                                                                MJPEG stream ← annotate frame ← count captures
 ```
 
-- **Motion gate**: MOG2 background subtraction on a narrow zone around the counting line (320px wide). YOLO only runs when pixel change exceeds threshold.
+- **Motion gate**: Background subtraction on a narrow zone around the counting line. YOLO only runs when pixel change exceeds threshold.
 - **Tracking**: ByteTrack with IoU-based matching + velocity prediction + greedy Hungarian assignment.
 - **Double-count prevention**: Minimum 15-frame gap between crossing events per tracked object.
 
-## Performance (Raspberry Pi Zero 2W)
-
-| Input size | Inference time | Est. FPS |
-|------------|---------------|----------|
-| 640×640 | ~350ms | ~3 FPS |
-| 320×320 | ~120ms | ~8 FPS |
-| 224×224 | ~75ms | ~13 FPS |
-
-Motion gating means YOLO only runs when something moves near the line, so effective throughput depends on traffic density.
+---
 
 ## COCO Vehicle Classes
 

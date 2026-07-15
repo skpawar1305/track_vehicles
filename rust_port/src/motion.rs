@@ -1,6 +1,12 @@
+use opencv::{
+    core,
+    imgproc,
+    prelude::*,
+    video,
+};
+
 pub struct MotionDetector {
-    background: Option<Vec<u8>>,
-    threshold: i32,
+    mog2: core::Ptr<video::BackgroundSubtractorMOG2>,
     resize_width: u32,
     pub line: Option<[i32; 4]>,
     zone: Option<[i32; 4]>,
@@ -8,15 +14,16 @@ pub struct MotionDetector {
 }
 
 impl MotionDetector {
-    pub fn new(threshold: i32) -> Self {
-        Self {
-            background: None,
-            threshold,
+    pub fn new(_threshold: i32) -> Result<Self, String> {
+        let mog2 = video::create_background_subtractor_mog2(500, 16.0, false)
+            .map_err(|e| format!("MOG2: {}", e))?;
+        Ok(Self {
+            mog2,
             resize_width: 320,
             line: None,
             zone: None,
             motion_state: false,
-        }
+        })
     }
 
     pub fn update_line(&mut self, line: [i32; 4]) {
@@ -30,16 +37,17 @@ impl MotionDetector {
         ]);
     }
 
-    pub fn detect(&mut self, frame: &[u8], fw: u32, fh: u32) -> bool {
+    pub fn detect(&mut self, frame: &core::Mat) -> bool {
         let zone = match self.zone {
             Some(z) => z,
             None => return false,
         };
 
-        let zx1 = zone[0].max(0) as usize;
-        let zy1 = zone[1].max(0) as usize;
-        let zx2 = (zone[2] as usize).min(fw as usize);
-        let zy2 = (zone[3] as usize).min(fh as usize);
+        let (fw, fh) = (frame.cols(), frame.rows());
+        let zx1 = zone[0].max(0);
+        let zy1 = zone[1].max(0);
+        let zx2 = (zone[2]).min(fw);
+        let zy2 = (zone[3]).min(fh);
         if zx2 <= zx1 || zy2 <= zy1 {
             self.motion_state = false;
             return false;
@@ -48,50 +56,25 @@ impl MotionDetector {
         let zw = zx2 - zx1;
         let zh = zy2 - zy1;
 
-        let scale = self.resize_width as f32 / zw as f32;
-        let rw = self.resize_width as usize;
-        let rh = (zh as f32 * scale) as usize;
-        if rh == 0 {
+        let roi = core::Rect::new(zx1, zy1, zw, zh);
+        let crop = core::Mat::roi(frame, roi).ok().unwrap();
+
+        let rw = self.resize_width as i32;
+        let rh = (zh as f64 * self.resize_width as f64 / zw as f64) as i32;
+        if rh <= 0 {
             self.motion_state = false;
             return false;
         }
 
-        let mut small = vec![0u8; rw * rh];
+        let mut small = core::Mat::default();
+        imgproc::resize(&crop, &mut small, core::Size::new(rw, rh), 0.0, 0.0, imgproc::INTER_LINEAR)
+            .ok();
 
-        // Simple nearest-neighbor resize of the zone
-        for y in 0..rh {
-            for x in 0..rw {
-                let sx = (x as f32 / scale) as usize + zx1;
-                let sy = (y as f32 / scale) as usize + zy1;
-                let src_idx = (sy * fw as usize + sx) * 3;
-                let dst_idx = (y * rw + x) * 3;
-                if src_idx + 3 <= frame.len() && dst_idx + 3 <= small.len() {
-                    let gray = (frame[src_idx] as u32 + frame[src_idx + 1] as u32
-                        + frame[src_idx + 2] as u32)
-                        / 3;
-                    small[dst_idx] = gray as u8;
-                    small[dst_idx + 1] = gray as u8;
-                    small[dst_idx + 2] = gray as u8;
-                }
-            }
-        }
+        let mut fgmask = core::Mat::default();
+        opencv::video::BackgroundSubtractorTrait::apply(&mut self.mog2, &small, &mut fgmask, -1.0).ok();
 
-        let fg_pixels = match &self.background {
-            Some(bg) if bg.len() == small.len() => {
-                let mut count = 0i32;
-                for i in (0..small.len()).step_by(3) {
-                    let diff = (small[i] as i32 - bg[i] as i32).abs();
-                    if diff > 25 {
-                        count += 1;
-                    }
-                }
-                count
-            }
-            _ => 0,
-        };
-
-        self.background = Some(small);
-        self.motion_state = fg_pixels > self.threshold;
+        let fg_count = core::count_non_zero(&fgmask).ok().unwrap_or(0);
+        self.motion_state = fg_count > self.resize_width as i32 * 2;
         self.motion_state
     }
 }
