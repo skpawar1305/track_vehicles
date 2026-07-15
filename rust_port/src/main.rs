@@ -31,7 +31,6 @@ const FRAME_SKIP: u32 = 1;
 
 fn main() -> Result<(), String> {
     let state = Arc::new(AppState::new("config.json"));
-    config::spawn_persist(state.clone());
 
     let server_state = state.clone();
     std::thread::spawn(move || {

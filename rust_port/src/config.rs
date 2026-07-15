@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -87,12 +87,9 @@ impl AppState {
     }
 }
 
-pub fn spawn_persist(state: Arc<AppState>) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(30));
-        let mut cfg = state.config.write().unwrap();
-        cfg.counts.in_count = state.count_in.load(Ordering::Relaxed);
-        cfg.counts.out = state.count_out.load(Ordering::Relaxed);
-        cfg.save(&state.config_path);
-    });
+pub fn persist_counts(state: &AppState) {
+    let mut cfg = state.config.write().unwrap();
+    cfg.counts.in_count = state.count_in.load(Ordering::Relaxed);
+    cfg.counts.out = state.count_out.load(Ordering::Relaxed);
+    cfg.save(&state.config_path);
 }
