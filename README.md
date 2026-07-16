@@ -31,68 +31,6 @@ Open `http://<device-ip>:5000` in a browser.
 
 ---
 
-## Rust Port (`rust_port/`)
-
-Lower-memory alternative using OpenCV for RTSP capture. Object detection currently runs via motion-gating only (ncnn stub) — line counting, tracking, and the full web UI work without YOLO.
-
-### Dependencies
-
-| Toolchain | Requirement |
-|-----------|-------------|
-| Rust | `rustup target add aarch64-unknown-linux-gnu` |
-| Cross-compiler | `gcc-aarch64-linux-gnu`, `g++-aarch64-linux-gnu` |
-| OpenCV ARM64 libs | Extract from `ghcr.io/hybridgroup/opencv:4.13.0` (see `setup_opencv.sh` in `face_door_unlock` project) |
-| libclang | `LIBCLANG_PATH` must point to a directory containing `libclang.so` |
-
-### Cross-compile for Pi
-
-```bash
-cd rust_port
-bash build_pi.sh
-```
-
-Produces `vehicle_counter_pi/` containing the binary + bundled OpenCV `.so` files.
-
-### Deploy
-
-```bash
-# Copy to device
-scp -r vehicle_counter_pi dietpi@<device-ip>:~/track_vehicles/rust_port/
-
-# On device, run
-cd ~/track_vehicles/rust_port/vehicle_counter_pi
-./run.sh
-```
-
-### Native build (on device)
-
-```bash
-cd rust_port
-cargo build --release
-./target/release/vehicle_counter
-```
-
-### Test with a YouTube video
-
-```bash
-cd test
-./run_test.sh
-# or with a specific video:
-./run_test.sh "https://www.youtube.com/watch?v=MNn9qKG2UFI"
-```
-
-The script uses `yt-dlp` to extract a direct stream URL, writes a config, and starts the server. Open `http://localhost:5000`, draw a counting line, and watch it count.
-
-### Config
-
-The same `config.json` from the Python version is used. Copy it alongside the binary:
-
-```bash
-cp config.json vehicle_counter_pi/
-```
-
----
-
 ## Web UI
 
 | Page | Path | Description |
@@ -121,25 +59,11 @@ All settings are stored in `config.json` and can be edited via the web UI:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `stream_url` | — | RTSP URL |
-| `target_size` | `320` | YOLO input size (224/320/640) |
+| `target_size` | `416` | NanoDet input size |
 | `conf_thresh` | `0.5` | Detection confidence threshold |
 | `motion_thresh` | `500` | Foreground pixel count to trigger motion |
 | `flip_sides` | `false` | Swap IN/OUT direction |
 | `enabled_classes` | `[2,3,5,7]` | Active vehicle COCO class IDs |
-
----
-
-## Architecture (Rust port)
-
-```
-RTSP → opencv::VideoCapture → motion gate → [ncnn stub] → ByteTrack → line-crossing check → capture save
-                                                                                                    ↓
-                                                               MJPEG stream ← annotate frame ← count captures
-```
-
-- **Motion gate**: Background subtraction on a narrow zone around the counting line. YOLO only runs when pixel change exceeds threshold.
-- **Tracking**: ByteTrack with IoU-based matching + velocity prediction + greedy Hungarian assignment.
-- **Double-count prevention**: Minimum 15-frame gap between crossing events per tracked object.
 
 ---
 
@@ -155,19 +79,7 @@ RTSP → opencv::VideoCapture → motion gate → [ncnn stub] → ByteTrack → 
 
 ## Testing
 
-Run unit tests:
-```bash
-cd rust_port
-LIBCLANG_PATH=/home/skpawar1305/robostack/.pixi/envs/humble/lib cargo test
-```
-
-Run integration test with a YouTube video:
-```bash
-cd test
-./run_test.sh "https://www.youtube.com/watch?v=MNn9qKG2UFI"
-```
-
-Then test API endpoints:
+Test API endpoints with a running server:
 ```bash
 curl http://localhost:5000/api/counts     # {"in":0,"out":0}
 curl http://localhost:5000/api/config     # current configuration

@@ -1,31 +1,31 @@
 {
-  "stream_url": "https://rr1---sn-ci5gup-2o9y.googlevideo.com/videoplayback?expire=1784246239&ei=fxtZauaRC6iPssUP8LzPUQ&ip=2401%3A4900%3A1c45%3A5023%3A6a46%3A8797%3A3aa4%3Af1dd&id=o-AA1jPoKRt1Q2twTQa1JBs6eYWMqZ6f-0BL0ZvgOZvcJ_&itag=18&source=youtube&requiressl=yes&xpc=EgVo2aDSNQ%3D%3D&cps=325&met=1784224639%2C&mh=_Q&mm=31%2C29&mn=sn-ci5gup-2o9y%2Csn-ci5gup-cvher&ms=au%2Crdu&mv=m&mvi=1&pl=54&rms=au%2Cau&initcwndbps=1793750&bui=AZFlqhPv6-vw2MeyNIvQljxPdFDQ7cVQnWm9Zy8tO9PwcxMdQiJq4RsHePhTvWUSy2gEXRH-HvkZMPSH&spc=SQ-umoUWRoVVkIXBxs3Zl7Ntlph7R3CAfl0z-s1YNkk5MdMfE_GWCq0dTCmyDmAe0LE&vprv=1&svpuc=1&mime=video%2Fmp4&rqh=1&cnr=14&ratebypass=yes&dur=306.201&lmt=1726215624570734&mt=1784224163&fvip=9&fexp=51565116&c=ANDROID&txp=5318224&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cxpc%2Cbui%2Cspc%2Cvprv%2Csvpuc%2Cmime%2Crqh%2Ccnr%2Cratebypass%2Cdur%2Clmt&sig=AE0s2JYwRQIgPyvXCwhLRVvedX8qsGTl5jrNTNb63VHZCMyPuvGfGSkCIQCtiYI1UkHdA7Ce-csDj9mIwZR8enK41Qpp28vlhwKtvQ%3D%3D&lsparams=cps%2Cmet%2Cmh%2Cmm%2Cmn%2Cms%2Cmv%2Cmvi%2Cpl%2Crms%2Cinitcwndbps&lsig=APaTxxMwRQIhAJ140ICE4tlQFnu2TWEivo-aHQXC11a216JHKzHKvnh7AiAwHjjfdFhsWN9TTQ26vfsdi-jsZzOQ-zNfqacVQzstmw%3D%3D",
+  "stream_url": "https://rr1---sn-ci5gup-2o9y.googlevideo.com/videoplayback?expire=1784250147&ei=wypZavaQMMfT3LUP3pT6yAo&ip=2401%3A4900%3A1c45%3A5023%3A6a46%3A8797%3A3aa4%3Af1dd&id=o-ACYiP9EqPMFLKk_fzCeGKTepgfz31QODC5d7oySho5He&itag=18&source=youtube&requiressl=yes&xpc=EgVo2aDSNQ%3D%3D&cps=304&met=1784228547%2C&mh=_Q&mm=31%2C29&mn=sn-ci5gup-2o9y%2Csn-ci5gup-cvher&ms=au%2Crdu&mv=m&mvi=1&pl=54&rms=au%2Cau&initcwndbps=2186250&bui=AZFlqhNBmgqrF_f6zqyLHFp8CcSRnQ71I7jo93l9xaGC1hI0rSG1syyTrCWJd9FuB1PI61krQzFchmH-&spc=SQ-umicZ8ogadr_MvQWFOWbSwOZsqMiZ1wB35oil5VGsJAhuweQC_P7_obPs4T4_dxo&vprv=1&svpuc=1&mime=video%2Fmp4&rqh=1&cnr=14&ratebypass=yes&dur=306.201&lmt=1726215624570734&mt=1784228006&fvip=9&fexp=51565115&c=ANDROID&txp=5318224&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cxpc%2Cbui%2Cspc%2Cvprv%2Csvpuc%2Cmime%2Crqh%2Ccnr%2Cratebypass%2Cdur%2Clmt&sig=AE0s2JYwRAIgWvJYgzaG1ZbXiF8kgEb4Wrn2B-j3KnV1kGb1bjvIZuMCIB8bdkeSHAb5PWQKth4XOv1kFtfeKwM_1KzrhGqCGtrW&lsparams=cps%2Cmet%2Cmh%2Cmm%2Cmn%2Cms%2Cmv%2Cmvi%2Cpl%2Crms%2Cinitcwndbps&lsig=APaTxxMwRAIgFRbqm7QU4WPAWKCAHYelOJ9ucY7tZcKRkGp5t0QuHJgCIDyzddrwhfz2voTA7GTV6-_IcSwTZLHYYRl5HpvElzSb",
   "line": [
-    257,
-    214,
-    357,
-    205
+    252,
+    227,
+    390,
+    211
   ],
   "roi": [
     [
-      244,
-      88
+      266,
+      124
     ],
     [
-      203,
-      347
+      248,
+      356
     ],
     [
-      414,
-      349
+      408,
+      354
     ],
     [
-      340,
-      87
+      346,
+      104
     ]
   ],
-  "conf_thresh": 0.25,
-  "flip_sides": true,
+  "conf_thresh": 0.5,
+  "flip_sides": false,
   "capture_dir": "captures",
   "max_captures": 1000,
   "enabled_classes": [

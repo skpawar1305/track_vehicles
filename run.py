@@ -594,7 +594,7 @@ def encoder_loop(cfg, latest_frame, frame_lock, tracker_state, tracker_lock):
 
         last_jpeg_t = now
         annotated = annotate_frame(frame.copy(), cfg.line, cfg.roi, objs, counts,
-                                   stream_fps, det_count, flip_sides=cfg.flip_sides, simple=True)
+                                   stream_fps, det_count, flip_sides=cfg.flip_sides, simple=False)
         # Resize to 640px wide before JPEG encode for speed
         h, w = annotated.shape[:2]
         if w > 640:
