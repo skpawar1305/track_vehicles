@@ -53,6 +53,20 @@ pub fn detect_crossing(
     Crossing::None
 }
 
+/// Check if a bounding box overlaps the line's bounding rectangle in both axes.
+pub fn bbox_touches_line(line: &[i32; 4], bbox: &[i32; 4]) -> bool {
+    let lx1 = line[0].min(line[2]);
+    let lx2 = line[0].max(line[2]);
+    let ly1 = line[1].min(line[3]);
+    let ly2 = line[1].max(line[3]);
+    let bx1 = bbox[0];
+    let bx2 = bbox[2];
+    let by1 = bbox[1];
+    let by2 = bbox[3];
+    // Allow a 20px margin vertically so smaller detections still register
+    bx1 <= lx2 && bx2 >= lx1 && by1 <= ly2 + 20 && by2 >= ly1 - 20
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

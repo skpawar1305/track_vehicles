@@ -101,7 +101,7 @@ pub fn draw_boxes(frame: &mut core::Mat, objects: &[(u32, &[i32; 4], &str)]) {
     }
 }
 
-pub fn draw_counts(frame: &mut core::Mat, in_count: usize, out_count: usize, fps: f32) {
+pub fn draw_counts(frame: &mut core::Mat, in_count: usize, out_count: usize, fps: f32, simple: bool) {
     let w = frame.cols();
     let h = frame.rows();
     let scale = 0.5;
@@ -113,6 +113,8 @@ pub fn draw_counts(frame: &mut core::Mat, in_count: usize, out_count: usize, fps
         imgproc::put_text(frame, &out_text, core::Point::new(w - 150, 42), imgproc::FONT_HERSHEY_SIMPLEX, scale, RED, 2, imgproc::LINE_8, false).ok();
     }
 
-    let fps_text = format!("{:.0} FPS", fps);
-    imgproc::put_text(frame, &fps_text, core::Point::new(6, h - 8), imgproc::FONT_HERSHEY_SIMPLEX, 0.4, WHITE, 1, imgproc::LINE_8, false).ok();
+    if !simple {
+        let fps_text = format!("{:.0} FPS", fps);
+        imgproc::put_text(frame, &fps_text, core::Point::new(6, h - 8), imgproc::FONT_HERSHEY_SIMPLEX, 0.4, WHITE, 1, imgproc::LINE_8, false).ok();
+    }
 }
