@@ -1,9 +1,6 @@
 use crate::types::Detection;
-use opencv::{
-    core,
-    dnn,
-    prelude::*,
-};
+use crate::ncnn_wrapper;
+use opencv::prelude::*;
 
 const COCO_CLASSES: &[&str] = &[
     "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
@@ -19,78 +16,116 @@ const COCO_CLASSES: &[&str] = &[
 ];
 
 pub struct Detector {
-    net: dnn::Net,
-    target_size: u32,
+    net: ncnn_wrapper::NcnnNet,
+    target_size: i32,
     conf_thresh: f32,
 }
 
 impl Detector {
     pub fn new(model_path: &str, target_size: u32) -> Result<Self, String> {
-        let onnx_path = if model_path.ends_with(".onnx") {
+        let ts = target_size as i32;
+        let model_dir = if model_path.ends_with("_ncnn_model") || model_path.contains("ncnn") {
             model_path.to_string()
         } else {
-            format!("{}.onnx", model_path.trim_end_matches("_ncnn_model"))
+            format!("{}_ncnn_model", model_path.trim_end_matches(".onnx"))
         };
-        let actual = if std::path::Path::new(&onnx_path).exists() {
-            onnx_path
-        } else if std::path::Path::new("models/yolo26n.onnx").exists() {
-            "models/yolo26n.onnx".to_string()
-        } else if std::path::Path::new("../models/yolo26n.onnx").exists() {
-            "../models/yolo26n.onnx".to_string()
+
+        let param_path = if model_path.ends_with(".param") {
+            model_path.to_string()
         } else {
-            return Err("No ONNX model found".into());
+            format!("{}/model.ncnn.param", model_dir)
         };
-        let net = dnn::read_net_from_onnx(&actual)
-            .map_err(|e| format!("dnn read_net: {}", e))?;
-        Ok(Self { net, target_size, conf_thresh: 0.5 })
+        let bin_path = if model_path.ends_with(".bin") {
+            model_path.to_string()
+        } else {
+            format!("{}/model.ncnn.bin", model_dir)
+        };
+
+        let param_path = resolve_path(&param_path);
+        let bin_path = resolve_path(&bin_path);
+
+        let net = ncnn_wrapper::NcnnNet::new().ok_or("ncnn net create failed")?;
+        net.load_param(&param_path)?;
+        net.load_model(&bin_path)?;
+
+        Ok(Self { net, target_size: ts, conf_thresh: 0.5 })
     }
 
-    pub fn detect(&mut self, mat: &core::Mat, enabled_classes: &[i32]) -> Vec<Detection> {
-        let ts = self.target_size as i32;
+    pub fn detect(&mut self, mat: &opencv::core::Mat, enabled_classes: &[i32]) -> Vec<Detection> {
+        let ts = self.target_size;
         let (fh, fw) = (mat.rows(), mat.cols());
+        if fh <= 0 || fw <= 0 { return vec![]; }
 
-        let blob = match dnn::blob_from_image(
-            mat, 1.0 / 255.0,
-            core::Size::new(ts, ts),
-            core::Scalar::new(0.0, 0.0, 0.0, 0.0),
-            false, false, core::CV_32F,
-        ) {
-            Ok(b) => b,
-            Err(_) => return vec![],
-        };
+        // Letterbox
+        let scale = (ts as f32 / fw as f32).min(ts as f32 / fh as f32);
+        let new_w = (fw as f32 * scale) as i32;
+        let new_h = (fh as f32 * scale) as i32;
+        let pad_x = (ts - new_w) / 2;
+        let pad_y = (ts - new_h) / 2;
 
-        if self.net.set_input(&blob, "", 1.0, core::Scalar::new(0.0, 0.0, 0.0, 0.0)).is_err() {
+        // Build padded letterbox image using OpenCV (fast)
+        let mut resized = opencv::core::Mat::default();
+        if opencv::imgproc::resize(mat, &mut resized, opencv::core::Size::new(new_w, new_h), 0.0, 0.0, opencv::imgproc::INTER_LINEAR).is_err() {
             return vec![];
         }
-        let output = match self.net.forward_single_def() {
-            Ok(o) => o,
-            Err(_) => return vec![],
-        };
 
-        let ms = output.mat_size();
-        let dims = ms.dims();
-        let ch = ms.get(1).unwrap_or(0);
-        let num_dets = ms.get(2).unwrap_or(0) as usize;
-        drop(ms);
-        if dims != 3 || ch != 84 || num_dets == 0 {
-            return vec![];
-        }
-        let num_classes = 80;
-
-        let mat_f32 = match output.try_into_typed::<f32>() {
+        let mut letterbox = match opencv::core::Mat::new_rows_cols_with_default(ts, ts, opencv::core::CV_8UC3, opencv::core::Scalar::new(128.0, 128.0, 128.0, 0.0)) {
             Ok(m) => m,
             Err(_) => return vec![],
         };
-        let data = match mat_f32.data_typed() {
-            Ok(d) => d,
+        let roi = opencv::core::Rect::new(pad_x, pad_y, new_w, new_h);
+        if let Ok(mut target_roi) = letterbox.roi_mut(roi) {
+            if resized.copy_to(&mut target_roi).is_err() { return vec![]; }
+        } else {
+            return vec![];
+        }
+        drop(resized);
+
+        // Convert BGR letterbox → CHW float [0, 1] (fast bulk operation)
+        let ts_u = ts as usize;
+        let total = (ts_u * ts_u) as usize;
+        let mut float_data = vec![0.0f32; total * 3];
+
+        if let Ok(pixels) = letterbox.data_bytes() {
+            for i in 0..total {
+                let b = pixels[i * 3] as f32 / 255.0;
+                let g = pixels[i * 3 + 1] as f32 / 255.0;
+                let r = pixels[i * 3 + 2] as f32 / 255.0;
+                float_data[i] = b;
+                float_data[total + i] = g;
+                float_data[2 * total + i] = r;
+            }
+        }
+
+        // Run ncnn inference
+        let ex = self.net.create_extractor();
+        if ex.input_bgr_normalized("in0", &float_data, ts, ts, 3).is_err() {
+            return vec![];
+        }
+        let out_mat = match ex.extract("out0") {
+            Ok(m) => m,
             Err(_) => return vec![],
         };
 
+        let data = out_mat.data_f32();
+        let (w, h, _c) = out_mat.shape();
+
+        // ncnn Mat shape: (w, h, c) = (spatial, channels, batch)
+        let num_dets = w as usize;
+        let num_channels = h as usize;
+
+        if num_channels < 5 || data.len() < num_channels * num_dets {
+            return vec![];
+        }
+
+        let num_classes = num_channels - 4; // 4 bbox + class scores
+
         let mut candidates: Vec<Detection> = Vec::new();
 
+        let mut raw_count = 0usize;
         for i in 0..num_dets {
             let cx = data[i];
-            let cy = data[num_dets + i];
+            let cy = data[1 * num_dets + i];
             let w = data[2 * num_dets + i];
             let h = data[3 * num_dets + i];
 
@@ -98,65 +133,71 @@ impl Detector {
             let mut best_cls = 0i32;
             for c in 0..num_classes {
                 let conf = data[(4 + c) * num_dets + i];
-                if conf > best_conf {
-                    best_conf = conf;
-                    best_cls = c as i32;
-                }
+                if conf > best_conf { best_conf = conf; best_cls = c as i32; }
             }
 
-            if best_conf < self.conf_thresh {
-                continue;
-            }
-            if !enabled_classes.is_empty() && !enabled_classes.contains(&best_cls) {
-                continue;
-            }
+            if best_conf < self.conf_thresh { continue; }
+            raw_count += 1;
+            if !enabled_classes.is_empty() && !enabled_classes.contains(&best_cls) { continue; }
 
-            let x1 = ((cx - w / 2.0).max(0.0).min((fw - 1) as f32)) as i32;
-            let y1 = ((cy - h / 2.0).max(0.0).min((fh - 1) as f32)) as i32;
-            let x2 = ((cx + w / 2.0).max(0.0).min((fw - 1) as f32)) as i32;
-            let y2 = ((cy + h / 2.0).max(0.0).min((fh - 1) as f32)) as i32;
-            if x2 <= x1 || y2 <= y1 {
-                continue;
-            }
+            // Map from padded letterbox space to original frame
+            let x1 = ((cx - w / 2.0 - pad_x as f32) / scale) as i32;
+            let y1 = ((cy - h / 2.0 - pad_y as f32) / scale) as i32;
+            let x2 = ((cx + w / 2.0 - pad_x as f32) / scale) as i32;
+            let y2 = ((cy + h / 2.0 - pad_y as f32) / scale) as i32;
 
-            let label = COCO_CLASSES.get(best_cls as usize).unwrap_or(&"?").to_string();
+            let x1 = x1.max(0).min(fw - 1);
+            let y1 = y1.max(0).min(fh - 1);
+            let x2 = x2.max(0).min(fw - 1);
+            let y2 = y2.max(0).min(fh - 1);
+
+            if x2 <= x1 || y2 <= y1 { continue; }
             candidates.push(Detection {
                 bbox: [x1, y1, x2, y2],
                 centroid: ((x1 + x2) / 2, (y1 + y2) / 2),
                 confidence: best_conf,
                 class_id: best_cls,
-                label,
+                label: COCO_CLASSES.get(best_cls as usize).unwrap_or(&"?").to_string(),
             });
         }
 
-        if candidates.is_empty() {
-            return candidates;
-        }
-
-        candidates.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
-        let mut kept = Vec::new();
-        let mut removed = vec![false; candidates.len()];
-
-        for i in 0..candidates.len() {
-            if removed[i] { continue; }
-            kept.push(candidates[i].clone());
-            for j in i + 1..candidates.len() {
-                if removed[j] { continue; }
-                let a = &candidates[i].bbox;
-                let b = &candidates[j].bbox;
-                let ix = a[0].max(b[0]);
-                let iy = a[1].max(b[1]);
-                let iw = (a[2].min(b[2]) - ix).max(0);
-                let ih = (a[3].min(b[3]) - iy).max(0);
-                let inter = iw * ih;
-                let area_a = (a[2] - a[0]) * (a[3] - a[1]);
-                let area_b = (b[2] - b[0]) * (b[3] - b[1]);
-                let iou = inter as f32 / (area_a + area_b - inter) as f32 + 1e-6;
-                if iou > 0.45 {
-                    removed[j] = true;
-                }
-            }
-        }
-        kept
+        candidates
     }
+}
+
+fn resolve_path(path: &str) -> String {
+    if std::path::Path::new(path).exists() {
+        return path.to_string();
+    }
+    // Try relative to cwd/models/
+    let alt = format!("models/{}", path.trim_start_matches("../models/"));
+    if std::path::Path::new(&alt).exists() {
+        return alt;
+    }
+    path.to_string()
+}
+
+fn non_max_suppression(mut dets: Vec<Detection>, iou_thresh: f32) -> Vec<Detection> {
+    if dets.is_empty() { return dets; }
+    dets.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    let mut keep = Vec::new();
+    while let Some(best) = dets.pop() {
+        keep.push(best.clone());
+        dets.retain(|d| {
+            let iou = iou(&d.bbox, &best.bbox);
+            iou < iou_thresh
+        });
+    }
+    keep
+}
+
+fn iou(a: &[i32; 4], b: &[i32; 4]) -> f32 {
+    let x1 = a[0].max(b[0]);
+    let y1 = a[1].max(b[1]);
+    let x2 = a[2].min(b[2]);
+    let y2 = a[3].min(b[3]);
+    let inter = (x2 - x1).max(0) * (y2 - y1).max(0);
+    let area_a = (a[2] - a[0]) * (a[3] - a[1]);
+    let area_b = (b[2] - b[0]) * (b[3] - b[1]);
+    inter as f32 / (area_a + area_b - inter) as f32 + 1e-6
 }

@@ -45,7 +45,7 @@ function render() {
   const grid = document.getElementById('grid'), shown = filtered();
   document.getElementById('count-label').textContent = allCaptures.length > 0 ? `(${allCaptures.length})` : '';
   if (shown.length === 0) { grid.innerHTML = '<div class="empty">'+(allCaptures.length===0?'No captures yet':'No '+filter+' captures')+'</div>'; return; }
-  grid.innerHTML = shown.map(c=>`<div class="card${selected.has(c.filename)?' selected':''}" onclick="toggle('${c.filename}')"><img src="${c.thumb_url}" loading="lazy"><div class="info"><span>${c.direction}</span><span>${c.timestamp}</span></div></div>`).join('');
+  grid.innerHTML = shown.map(c=>`<div class="card${selected.has(c.filename)?' selected':''}" onclick="toggle('${c.filename}')"><img src="${c.url}" loading="lazy"><div class="info"><span>${c.direction}</span><span>${c.timestamp}</span></div></div>`).join('');
   document.getElementById('delete-btn').disabled = selected.size === 0;
 }
 function toggle(fn) { selected.has(fn) ? selected.delete(fn) : selected.add(fn); render(); }

@@ -14,6 +14,27 @@ pub fn which_side(line: &[i32; 4], point: (i32, i32)) -> i8 {
     if cp >= 0 { 1 } else { -1 }
 }
 
+/// Distance from a point to a line segment (in pixels)
+pub fn point_line_distance(line: &[i32; 4], point: (i32, i32)) -> f64 {
+    let ax = line[0] as f64;
+    let ay = line[1] as f64;
+    let bx = line[2] as f64;
+    let by = line[3] as f64;
+    let px = point.0 as f64;
+    let py = point.1 as f64;
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len2 = dx * dx + dy * dy;
+    if len2 == 0.0 {
+        return ((px - ax).powi(2) + (py - ay).powi(2)).sqrt();
+    }
+    let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+    let t = t.clamp(0.0, 1.0);
+    let near_x = ax + t * dx;
+    let near_y = ay + t * dy;
+    ((px - near_x).powi(2) + (py - near_y).powi(2)).sqrt()
+}
+
 pub fn detect_crossing(
     line: &[i32; 4],
     old_centroid: (i32, i32),

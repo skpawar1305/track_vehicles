@@ -67,13 +67,14 @@ input:focus { outline: none; border-color: #3b82f6; }
     </div>
 
     <div class="section">
-      <h3>Line Tool</h3>
+      <h3>Detection Zone</h3>
       <div class="toolbar">
+        <button class="btn btn-sm btn-primary" id="draw-roi-btn">Draw Zone</button>
         <button class="btn btn-sm btn-primary" id="draw-btn">Draw Line</button>
         <button class="btn btn-sm btn-danger" id="clear-btn">Clear</button>
-        <button class="btn btn-sm btn-secondary" id="save-line-btn">Save</button>
+        <button class="btn btn-sm btn-secondary" id="save-roi-btn">Save</button>
       </div>
-      <div id="line-status">Click two points on the video to draw the counting line</div>
+      <div id="line-status">Click 4 points for detection zone, then 2 points for counting line</div>
     </div>
 
     <div class="section">
@@ -110,7 +111,8 @@ input:focus { outline: none; border-color: #3b82f6; }
 </div>
 
 <script>
-let linePoints = [], savedLine = null, drawing = false;
+let roiPoints = [], savedRoi = null, linePoints = [], savedLine = null;
+let mode = null; // 'roi' or 'line'
 let canvas, ctx, img;
 
 function init() {
@@ -134,31 +136,58 @@ function init() {
   window.addEventListener('resize', resize);
   setTimeout(resize, 500);
 
-  loadConfig(); loadLine(); loadCounts(); loadCaptures(); loadVehicleTypes();
+  loadConfig(); loadRoi(); loadLine(); loadCounts(); loadCaptures(); loadVehicleTypes();
   setInterval(loadCounts, 2000); setInterval(loadCaptures, 3000);
   canvas.addEventListener('click', onCanvasClick);
 
-  document.getElementById('draw-btn').addEventListener('click', () => { drawing = true; linePoints = []; document.getElementById('line-status').textContent = 'Click first point'; redraw(); });
-  document.getElementById('clear-btn').addEventListener('click', () => {
-    drawing = false; linePoints = []; savedLine = null; redraw();
-    fetch('/api/line', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({line:null})});
-    document.getElementById('line-status').textContent = 'Line cleared';
-  });
-  document.getElementById('save-line-btn').addEventListener('click', saveLine);
+  document.getElementById('draw-roi-btn').addEventListener('click', startRoi);
+  document.getElementById('draw-btn').addEventListener('click', startLine);
+  document.getElementById('clear-btn').addEventListener('click', clearAll);
+  document.getElementById('save-roi-btn').addEventListener('click', saveAll);
   document.getElementById('reset-btn').addEventListener('click', () => { if (confirm('Reset?')) fetch('/api/reset',{method:'POST'}); });
   document.getElementById('flip-btn').addEventListener('click', flipSides);
   document.getElementById('connect-btn').addEventListener('click', applyStream);
 }
 
+function startRoi() {
+  mode = 'roi'; roiPoints = []; linePoints = [];
+  document.getElementById('line-status').textContent = 'Click 4 corners of detection zone';
+  redraw();
+}
+
+function startLine() {
+  if (!savedRoi && roiPoints.length < 4) {
+    document.getElementById('line-status').textContent = 'Draw detection zone first';
+    return;
+  }
+  mode = 'line'; linePoints = [];
+  document.getElementById('line-status').textContent = 'Click 2 points for counting line';
+  redraw();
+}
+
 function onCanvasClick(e) {
-  if (!drawing) return;
+  if (!mode) return;
   const r = img.getBoundingClientRect();
   if (r.width === 0) return;
   const sx = (img.naturalWidth || 1) / r.width, sy = (img.naturalHeight || 1) / r.height;
   const x = Math.round((e.clientX - r.left) * sx), y = Math.round((e.clientY - r.top) * sy);
-  linePoints.push({x, y}); redraw();
-  if (linePoints.length === 1) document.getElementById('line-status').textContent = 'Now click second point';
-  else if (linePoints.length === 2) { drawing = false; document.getElementById('line-status').textContent = 'Line drawn. Click Save.'; }
+  if (mode === 'roi') {
+    roiPoints.push({x, y}); redraw();
+    if (roiPoints.length === 4) {
+      mode = null;
+      document.getElementById('line-status').textContent = 'Zone drawn. Now draw the counting line or click Save.';
+    } else {
+      document.getElementById('line-status').textContent = `Click corner ${roiPoints.length + 1} of 4`;
+    }
+  } else if (mode === 'line') {
+    linePoints.push({x, y}); redraw();
+    if (linePoints.length === 2) {
+      mode = null;
+      document.getElementById('line-status').textContent = 'Line drawn. Click Save.';
+    } else {
+      document.getElementById('line-status').textContent = 'Click second point';
+    }
+  }
 }
 
 function getImgScale() {
@@ -171,26 +200,104 @@ function getImgScale() {
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const { sx, sy, ox, oy } = getImgScale();
-  const pts = savedLine || linePoints;
-  if (pts.length === 2) {
-    ctx.strokeStyle = savedLine ? '#3b82f6' : '#fbbf24'; ctx.lineWidth = 3; ctx.beginPath();
-    ctx.moveTo(pts[0].x * sx + ox, pts[0].y * sy + oy);
-    ctx.lineTo(pts[1].x * sx + ox, pts[1].y * sy + oy); ctx.stroke();
-    for (let i = 0; i < 2; i++) { ctx.beginPath(); ctx.arc(pts[i].x * sx + ox, pts[i].y * sy + oy, 5, 0, 2 * Math.PI); ctx.fillStyle = '#fbbf24'; ctx.fill(); }
-  } else if (pts.length === 1) {
-    ctx.beginPath(); ctx.arc(pts[0].x * sx + ox, pts[0].y * sy + oy, 6, 0, 2 * Math.PI); ctx.fillStyle = '#fbbf24'; ctx.fill();
+  const activeRoi = savedRoi || roiPoints;
+  const activeLine = savedLine || linePoints;
+
+  // Draw ROI quadrilateral + bounding rect
+  if (activeRoi.length === 4) {
+    const pts = activeRoi.map(p => [p.x * sx + ox, p.y * sy + oy]);
+    ctx.strokeStyle = savedRoi ? '#ffb347' : '#fbbf24'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < 4; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath(); ctx.stroke();
+    ctx.fillStyle = savedRoi ? 'rgba(255,179,71,0.08)' : 'rgba(251,191,36,0.08)';
+    ctx.fill();
+
+    // bounding rect
+    const xs = activeRoi.map(p => p.x), ys = activeRoi.map(p => p.y);
+    const bx1 = Math.min(...xs) * sx + ox, by1 = Math.min(...ys) * sy + oy;
+    const bx2 = Math.max(...xs) * sx + ox, by2 = Math.max(...ys) * sy + oy;
+    ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.setLineDash([4,4]);
+    ctx.strokeRect(bx1, by1, bx2 - bx1, by2 - by1);
+    ctx.setLineDash([]);
+
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath(); ctx.arc(pts[i][0], pts[i][1], 5, 0, 2 * Math.PI);
+      ctx.fillStyle = '#fbbf24'; ctx.fill();
+    }
+  }
+
+  // Draw counting line
+  if (activeLine.length === 2) {
+    const p1 = { x: activeLine[0].x * sx + ox, y: activeLine[0].y * sy + oy };
+    const p2 = { x: activeLine[1].x * sx + ox, y: activeLine[1].y * sy + oy };
+    ctx.strokeStyle = savedLine ? '#3b82f6' : '#60a5fa'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+    for (const p of [p1, p2]) {
+      ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
+      ctx.fillStyle = '#60a5fa'; ctx.fill();
+    }
+  }
+
+  // Draw points in progress
+  const currentRoi = !savedRoi ? roiPoints : [];
+  for (const p of currentRoi) {
+    ctx.beginPath(); ctx.arc(p.x * sx + ox, p.y * sy + oy, 6, 0, 2 * Math.PI);
+    ctx.fillStyle = '#fbbf24'; ctx.fill();
+  }
+  const currentLine = !savedLine ? linePoints : [];
+  for (const p of currentLine) {
+    ctx.beginPath(); ctx.arc(p.x * sx + ox, p.y * sy + oy, 6, 0, 2 * Math.PI);
+    ctx.fillStyle = '#60a5fa'; ctx.fill();
   }
 }
 
-function saveLine() {
-  if (linePoints.length !== 2) { document.getElementById('line-status').textContent = 'Draw a line first'; return; }
-  const line = [linePoints[0].x, linePoints[0].y, linePoints[1].x, linePoints[1].y];
-  fetch('/api/line', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({line})})
-    .then(r=>r.json()).then(d=>{ if (d.status === 'ok') { savedLine = linePoints.slice(); document.getElementById('line-status').textContent = 'Line saved!'; redraw(); } });
+function saveAll() {
+  const status = document.getElementById('line-status');
+  const ok = [];
+  if (roiPoints.length === 4) {
+    const roi = roiPoints.map(p => [p.x, p.y]);
+    fetch('/api/roi', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({roi})})
+      .then(r=>r.json()).then(d => { if (d.status === 'ok') { savedRoi = roiPoints.slice(); ok.push('roi'); maybeDone(); } });
+  }
+  if (linePoints.length === 2) {
+    const line = [linePoints[0].x, linePoints[0].y, linePoints[1].x, linePoints[1].y];
+    fetch('/api/line', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({line})})
+      .then(r=>r.json()).then(d => { if (d.status === 'ok') { savedLine = linePoints.slice(); ok.push('line'); maybeDone(); } });
+  }
+  if (roiPoints.length + linePoints.length === 0) {
+    status.textContent = 'Draw a zone and/or line first';
+  }
+  function maybeDone() {
+    if (ok.length > 0) { status.textContent = 'Saved!'; redraw(); }
+  }
+}
+
+function clearAll() {
+  mode = null; roiPoints = []; linePoints = []; savedRoi = null; savedLine = null;
+  fetch('/api/roi', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({roi:null})});
+  fetch('/api/line', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({line:null})});
+  document.getElementById('line-status').textContent = 'Cleared';
+  redraw();
+}
+
+function loadRoi() {
+  fetch('/api/roi').then(r=>r.json()).then(d => {
+    if (d.roi && d.roi.length === 4) {
+      savedRoi = d.roi.map(p => ({x: p[0], y: p[1]}));
+      document.getElementById('line-status').textContent = 'Zone loaded';
+      redraw();
+    }
+  });
 }
 
 function loadLine() {
-  fetch('/api/line').then(r=>r.json()).then(d=>{ if (d.line && d.line.length === 4) { savedLine = [{x:d.line[0],y:d.line[1]},{x:d.line[2],y:d.line[3]}]; document.getElementById('line-status').textContent = 'Line loaded'; redraw(); } });
+  fetch('/api/line').then(r=>r.json()).then(d => {
+    if (d.line && d.line.length === 4) {
+      savedLine = [{x:d.line[0],y:d.line[1]},{x:d.line[2],y:d.line[3]}];
+      redraw();
+    }
+  });
 }
 
 function loadConfig() {

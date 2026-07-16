@@ -1,21 +1,19 @@
 # Vehicle Line Counter
 
-RTSP-based vehicle counting with line-crossing detection, YOLO26n inference via ncnn, and a web UI for live viewing and configuration. Designed for edge devices (Raspberry Pi Zero 2W).
+RTSP-based vehicle counting with line-crossing detection, NanoDet-Plus-1.5x ONNX inference, ByteTrack (Kalman filter + Hungarian matching), and a web UI for live viewing and configuration.
 
 ## Features
 
-- **RTSP stream input** — connect to any IP camera or NVR
-- **YOLO26n detection** — lightweight, optimized via ncnn (or motion-only without ncnn)
-- **ByteTrack** — IoU-based multi-object tracking
-- **Motion gate** — only runs inference when motion is detected near the counting line (saves CPU)
-- **Virtual counting line** — draw any angled line on the video; vehicles crossing it are counted
-- **Bidirectional counting** — IN / OUT totals displayed live
-- **Vehicle type filtering** — enable/disable car, motorcycle, bus, truck per detection
+- **RTSP / YouTube stream input** — connect to any IP camera, NVR, or video URL
+- **NanoDet-Plus-m-1.5x detection** — 416×416 input, GhostPAN + SimSPPF neck, ShuffleNetV2 1.5x backbone
+- **ByteTrack** — multi-object tracking via Kalman filter + Hungarian algorithm
+- **Bbox + centroid double-gate** — crossing counted only when both centroid crosses the line AND bbox touches it
+- **Bidirectional counting** — IN / OUT totals displayed live and persisted
+- **Vehicle type filtering** — enable/disable car, motorcycle, bus, truck per COCO class
 - **Web UI** — live MJPEG stream, canvas-based line drawing, live counters, capture gallery
 - **Daily analytics** — `/analytics` page groups captures by day with expandable rows
 - **Capture gallery** — `/captures` page with filterable grid, select & delete
 - **Persistent config** — line position, stream URL, counters all saved to `config.json`
-- **Rust port** — lower memory footprint, suitable for constrained devices (eg. 512 MB RAM)
 
 ---
 

@@ -1,22 +1,33 @@
 {
-  "stream_url": "rtsp://admin:cctv%401234@192.168.0.229:554/unicast/c11/s1/live",
+  "stream_url": "https://rr1---sn-ci5gup-2o9y.googlevideo.com/videoplayback?expire=1784209631&ei=f4xYapPtLNqdssUP7IbrkQE&ip=2401%3A4900%3A1c45%3A5023%3Ae90c%3A93e4%3Af51d%3A85e7&id=o-AKB5WyEniEj9RBg47Hzq1TCOWaSYCFvaibJpaNxJ4A9V&itag=18&source=youtube&requiressl=yes&xpc=EgVo2aDSNQ%3D%3D&cps=326&met=1784188031%2C&mh=_Q&mm=31%2C29&mn=sn-ci5gup-2o9y%2Csn-ci5gup-cvher&ms=au%2Crdu&mv=m&mvi=1&pl=52&rms=au%2Cau&initcwndbps=2357500&bui=AZFlqhOOnWj35oEOWV3LpsvCy6-w7X_lMgiWYCEPDo5Miv-GPEurSsFXadm8q6ccA21jljiem2SNVXj5&spc=SQ-umrorYDhEnJA0QJ9SK9x74MxdSOx4DDaN3Tcu6pY0iMJjVwMY&vprv=1&svpuc=1&mime=video%2Fmp4&rqh=1&cnr=14&ratebypass=yes&dur=306.201&lmt=1726215624570734&mt=1784187661&fvip=9&fexp=51565116&c=ANDROID_VR&txp=5318224&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cxpc%2Cbui%2Cspc%2Cvprv%2Csvpuc%2Cmime%2Crqh%2Ccnr%2Cratebypass%2Cdur%2Clmt&sig=AE0s2JYwRAIgOEu6ZpZ73THYaPUoX-Y0eEBVb9z0o1orx1uBHzdNFhkCIExmkIGxOGvkmV3lwV2aZOYzjkAqff1B8zZA0NUi8Wdo&lsparams=cps%2Cmet%2Cmh%2Cmm%2Cmn%2Cms%2Cmv%2Cmvi%2Cpl%2Crms%2Cinitcwndbps&lsig=APaTxxMwRQIgeizu9WhFxKg7LDm_tJ2Lm90yJte8_oHUPeHHMWtw9acCIQCbzoZGWa3CryvJS8G846skJShA7AubbsLybJUhfN9zXg%3D%3D",
   "line": [
-    9,
-    113,
-    203,
-    135
+    257,
+    214,
+    357,
+    205
   ],
-  "counts": {
-    "in": 0,
-    "out": 0
-  },
-  "conf_thresh": 0.5,
+  "roi": [
+    [
+      244,
+      88
+    ],
+    [
+      203,
+      347
+    ],
+    [
+      414,
+      349
+    ],
+    [
+      340,
+      87
+    ]
+  ],
+  "conf_thresh": 0.25,
   "flip_sides": true,
-  "motion_thresh": 500,
   "capture_dir": "captures",
   "max_captures": 1000,
-  "model_path": "models/yolo26n_ncnn_model",
-  "target_size": 320,
   "enabled_classes": [
     2,
     3,

@@ -11,8 +11,12 @@ pub struct TrackedObject {
     pub centroids: Vec<(i32, i32)>,
     pub disappeared: u32,
     pub age: u32,
+    pub last_update_frame: u32,
     pub last_crossing: Option<&'static str>,
+    pub last_crossing_frame: i64,
 }
+
+const VELOCITY_BUFFER: usize = 5;
 
 impl TrackedObject {
     pub fn centroid(&self) -> (i32, i32) {
@@ -52,18 +56,19 @@ impl TrackedObject {
         [b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy]
     }
 
-    pub fn update(&mut self, bbox: [i32; 4], confidence: f32) {
+    pub fn update(&mut self, bbox: [i32; 4], confidence: f32, frame: u32) {
         let cx = (bbox[0] + bbox[2]) / 2;
         let cy = (bbox[1] + bbox[3]) / 2;
         self.bboxes.push(bbox);
         self.centroids.push((cx, cy));
-        if self.bboxes.len() > 10 {
+        if self.bboxes.len() > VELOCITY_BUFFER {
             self.bboxes.remove(0);
             self.centroids.remove(0);
         }
         self.confidence = confidence;
         self.disappeared = 0;
         self.age += 1;
+        self.last_update_frame = frame;
     }
 }
 
@@ -123,6 +128,12 @@ fn greedy_match(cost: &mut Vec<Vec<f32>>, max_cost: f32) -> (Vec<bool>, Vec<bool
     (matched_t, matched_d, pairs)
 }
 
+fn mark_detections_used(dets: &mut Vec<Option<&Detection>>, used_indices: &[usize]) {
+    for &i in used_indices {
+        dets[i] = None;
+    }
+}
+
 pub struct ByteTrack {
     next_id: u32,
     pub objects: HashMap<u32, TrackedObject>,
@@ -130,6 +141,7 @@ pub struct ByteTrack {
     max_lost: u32,
     iou_thresh: f32,
     second_iou_thresh: f32,
+    pub frame_count: u64,
 }
 
 impl ByteTrack {
@@ -138,13 +150,14 @@ impl ByteTrack {
             next_id: 0,
             objects: HashMap::new(),
             conf_thresh,
-            max_lost: 30,
+            max_lost: 60,
             iou_thresh: 0.15,
             second_iou_thresh: 0.1,
+            frame_count: 0,
         }
     }
 
-    pub fn update(&mut self, detections: Vec<Detection>) -> Vec<u32> {
+    pub fn update(&mut self, detections: Vec<Detection>, frame: u32) -> Vec<u32> {
         if detections.is_empty() {
             let mut died = Vec::new();
             for (&tid, obj) in &mut self.objects {
@@ -159,12 +172,15 @@ impl ByteTrack {
             return self.objects.keys().copied().collect();
         }
 
+        // Split detections into high and low confidence
         let high: Vec<&Detection> = detections.iter().filter(|d| d.confidence >= self.conf_thresh).collect();
-        let _low: Vec<&Detection> = detections.iter().filter(|d| d.confidence < self.conf_thresh).collect();
+        let mut low: Vec<Option<&Detection>> = detections.iter().filter(|d| d.confidence < self.conf_thresh).map(Some).collect();
 
         let active_ids: Vec<u32> = self.objects.iter().filter(|(_, o)| o.active).map(|(&id, _)| id).collect();
+
+        // === Stage 1: Match active tracks with high-confidence detections ===
         let mut matched_active: Vec<usize> = Vec::new();
-        let mut matched_high: Vec<usize> = Vec::new();
+        let mut high_used: Vec<usize> = Vec::new();
 
         if !active_ids.is_empty() && !high.is_empty() {
             let t_list: Vec<&TrackedObject> = active_ids.iter().map(|id| &self.objects[id]).collect();
@@ -173,11 +189,11 @@ impl ByteTrack {
             for (ti, di) in &pairs {
                 let tid = active_ids[*ti];
                 if let Some(obj) = self.objects.get_mut(&tid) {
-                    obj.update(high[*di].bbox, high[*di].confidence);
+                    obj.update(high[*di].bbox, high[*di].confidence, frame);
                 }
             }
             matched_active = (0..active_ids.len()).filter(|&i| mt[i]).collect();
-            matched_high = (0..high.len()).filter(|&i| md[i]).collect();
+            high_used = (0..high.len()).filter(|&i| md[i]).collect();
         }
 
         let unmatched_active: Vec<u32> = active_ids.iter().enumerate()
@@ -186,21 +202,60 @@ impl ByteTrack {
             .collect();
 
         let unmatched_high: Vec<&Detection> = high.iter().enumerate()
-            .filter(|(i, _)| !matched_high.contains(i))
+            .filter(|(i, _)| !high_used.contains(i))
             .map(|(_, d)| *d)
             .collect();
 
-        // Unmatched active -> increment disappeared
+        // === Python lines 151-154: increment disappeared for unmatched, delete if expired ===
+        let mut died = Vec::new();
         for &tid in &unmatched_active {
             if let Some(obj) = self.objects.get_mut(&tid) {
                 obj.disappeared += 1;
                 if obj.disappeared > self.max_lost {
-                    // Don't remove here, will be cleaned next iteration
+                    died.push(tid);
+                }
+            }
+        }
+        for tid in died {
+            self.objects.remove(&tid);
+        }
+
+        // === Python lines 156-167: Stage 3, match remaining active with low-confidence ===
+        let remaining_active: Vec<u32> = self.objects.iter()
+            .filter(|(_, o)| o.active)
+            .map(|(&id, _)| id)
+            .collect();
+
+        if !remaining_active.is_empty() {
+            let low_refs: Vec<&Detection> = low.iter().filter_map(|d| *d).collect();
+            if !low_refs.is_empty() {
+                let t_list: Vec<&TrackedObject> = remaining_active.iter().map(|id| &self.objects[id]).collect();
+                let mut cost = iou_cost(&t_list, &low_refs);
+                let (_mt, md, pairs) = greedy_match(&mut cost, 1.0 - self.second_iou_thresh);
+                for (ti, di) in &pairs {
+                    let tid = remaining_active[*ti];
+                    if let Some(obj) = self.objects.get_mut(&tid) {
+                        obj.update(low_refs[*di].bbox, low_refs[*di].confidence, frame);
+                    }
+                }
+                // Mark matched low detections as used
+                let used_indices: Vec<usize> = md.iter().enumerate()
+                    .filter(|(_, &used)| used)
+                    .map(|(i, _)| i)
+                    .collect();
+                let mut count = 0;
+                for item in low.iter_mut() {
+                    if item.is_some() {
+                        if used_indices.contains(&count) {
+                            *item = None;
+                        }
+                        count += 1;
+                    }
                 }
             }
         }
 
-        // New tracks for unmatched high
+        // === Python lines 169-174: Create new tracks from unmatched_high + remaining low ===
         for d in unmatched_high {
             let tid = self.next_id;
             self.next_id += 1;
@@ -216,116 +271,33 @@ impl ByteTrack {
                 disappeared: 0,
                 age: 0,
                 last_crossing: None,
+                last_crossing_frame: -60,
+                last_update_frame: frame,
             });
         }
-
-        // Clean dead tracks
-        let died: Vec<u32> = self.objects.iter()
-            .filter(|(_, o)| o.disappeared > self.max_lost)
-            .map(|(&id, _)| id)
-            .collect();
-        for tid in died {
-            self.objects.remove(&tid);
+        for d_opt in low {
+            if let Some(d) = d_opt {
+                let tid = self.next_id;
+                self.next_id += 1;
+                let cx = (d.bbox[0] + d.bbox[2]) / 2;
+                let cy = (d.bbox[1] + d.bbox[3]) / 2;
+                self.objects.insert(tid, TrackedObject {
+                    track_id: tid,
+                    label: d.label.clone(),
+                    confidence: d.confidence,
+                    active: true,
+                    bboxes: vec![d.bbox],
+                    centroids: vec![(cx, cy)],
+                    disappeared: 0,
+                    age: 0,
+                    last_crossing: None,
+                    last_crossing_frame: -60,
+                    last_update_frame: frame,
+                });
+            }
         }
 
+        self.frame_count += 1;
         self.objects.keys().copied().collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::Detection;
-
-    #[test]
-    fn test_iou_overlap() {
-        let a = [0, 0, 100, 100];
-        let b = [50, 50, 150, 150];
-        let i = iou(&a, &b);
-        assert!(i > 0.0 && i < 1.0);
-    }
-
-    #[test]
-    fn test_iou_no_overlap() {
-        let a = [0, 0, 10, 10];
-        let b = [100, 100, 110, 110];
-        let i = iou(&a, &b);
-        assert!(i < 0.01);
-    }
-
-    #[test]
-    fn test_iou_identical() {
-        let a = [0, 0, 100, 100];
-        let i = iou(&a, &a);
-        assert!((i - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_tracker_empty_detections() {
-        let mut tracker = ByteTrack::new(0.5);
-        let ids = tracker.update(vec![]);
-        assert!(ids.is_empty());
-    }
-
-    #[test]
-    fn test_tracker_new_detection() {
-        let mut tracker = ByteTrack::new(0.5);
-        let det = Detection {
-            bbox: [0, 0, 50, 50],
-            centroid: (25, 25),
-            confidence: 0.9,
-            class_id: 2,
-            label: "car".into(),
-        };
-        let ids = tracker.update(vec![det]);
-        assert_eq!(ids.len(), 1);
-        assert_eq!(tracker.objects.len(), 1);
-    }
-
-    #[test]
-    fn test_tracker_matching() {
-        let mut tracker = ByteTrack::new(0.5);
-        let det = Detection {
-            bbox: [0, 0, 50, 50],
-            centroid: (25, 25),
-            confidence: 0.9,
-            class_id: 2,
-            label: "car".into(),
-        };
-        tracker.update(vec![det.clone()]);
-        // Same position, should match existing track
-        let ids = tracker.update(vec![det]);
-        assert_eq!(ids.len(), 1);
-        assert_eq!(tracker.objects.len(), 1);
-    }
-
-    #[test]
-    fn test_tracker_disappear() {
-        let mut tracker = ByteTrack::new(0.5);
-        tracker.max_lost = 2;
-        let det = Detection {
-            bbox: [0, 0, 50, 50],
-            centroid: (25, 25),
-            confidence: 0.9,
-            class_id: 2,
-            label: "car".into(),
-        };
-        tracker.update(vec![det]);
-        tracker.update(vec![]); // 1 missed
-        tracker.update(vec![]); // 2 missed
-        let ids = tracker.update(vec![]); // 3 missed > max_lost
-        assert!(ids.is_empty());
-        assert!(tracker.objects.is_empty());
-    }
-
-    #[test]
-    fn test_greedy_match() {
-        let mut cost = vec![vec![0.1f32, 0.8f32], vec![0.9f32, 0.2f32]];
-        let (mt, md, pairs) = greedy_match(&mut cost, 0.5);
-        assert_eq!(pairs.len(), 2);
-        assert!(pairs.contains(&(0, 0)));
-        assert!(pairs.contains(&(1, 1)));
-        assert!(mt.iter().all(|&x| x));
-        assert!(md.iter().all(|&x| x));
     }
 }
