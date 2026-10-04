@@ -19,8 +19,12 @@ cd /opt/tracker
 python3 -m venv venv
 ./venv/bin/pip install --upgrade pip wheel
 ./venv/bin/pip install -r requirements.txt
-# Pure-Python but declares torch as a hard dep; skip it.
-./venv/bin/pip install --no-deps bytetracker==0.3.2
+
+# ncnn declares the GUI build of OpenCV (opencv-python) as a dep, which needs
+# libxcb/libGL that aren't present on a headless DietPi. Replace it with the
+# headless build that actually imports on this system.
+./venv/bin/pip uninstall -y opencv-python opencv-python-headless
+./venv/bin/pip install --no-cache-dir opencv-python-headless
 
 chown -R tracker:tracker /opt/tracker
 

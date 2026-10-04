@@ -29,7 +29,8 @@ import numpy as np
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from run import (YoloNcnn, MotionDetector, HybridDetector, BYTETracker, TrackInfo, annotate_live,
+from bytetracker import BYTETracker
+from run import (YoloNcnn, MotionDetector, HybridDetector, TrackInfo, annotate_live,
                  annotate_frame, _VEHICLE_NAMES, MAX_DETECTIONS_PER_FRAME,
                  detect_crossing, segment_crosses_line, bbox_touches_line, CrossingGate,
                  CROSSING_NONE, CROSSING_IN, CROSSING_OUT)
@@ -268,16 +269,13 @@ def main():
 
             # Line crossing -> capture + upload event (same logic as run.py)
             for obj in objects:
-                if not (line_px and obj.prev_centroid and obj.age >= 2):
+                if not (line_px and obj.age >= 2):
                     continue
-                crossing = detect_crossing(line_px, obj.prev_centroid, obj.centroid, flip=flip)
-                seg = segment_crosses_line(line_px, obj.prev_centroid, obj.centroid)
+                crossing = gate.crossing(line_px, obj, flip=flip, margin=0.015 * fh)
                 if debug:
-                    print(f"[dbg] #{obj.track_id} {obj.label} cross={crossing} seg={seg} "
-                          f"age={obj.age} allow={gate.allow(obj, now, fh)}")
+                    print(f"[dbg] #{obj.track_id} {obj.label} cross={crossing} "
+                          f"age={obj.age} side={gate.side.get(obj.track_id)}")
                 if crossing == CROSSING_NONE:
-                    continue
-                if not seg:
                     continue
                 if not gate.allow(obj, now, fh):
                     continue

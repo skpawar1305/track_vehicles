@@ -1,15 +1,15 @@
 # Vehicle Line Counter
 
 RTSP vehicle counting with line-crossing detection. Inference is **YOLO26n INT8** via
-**ncnn** (ARM-optimised), tracking is **ByteTrack**, the edge store is **offline-first
-SQLite**, and the dashboard is **Bun + Drizzle + SQLite** on a VPS.
+**ncnn** (ARM-optimised), tracking is a **low-fps centroid tracker**, the edge store is
+**offline-first SQLite**, and the dashboard is **Bun + Drizzle + SQLite** on a VPS.
 
 ```
 ┌──────────────── Pi 5 (DietPi, behind NAT) ─────────────────────────┐
 │ NVR substream 640x360 H.264                                        │
 │   reader thread ─▶ newest frame                                    │
 │   detect thread ─▶ motion latch + YOLO26n INT8 (ncnn)             │
-│   tracking loop ─▶ ByteTrack @ camera rate + crossing gate        │
+│   tracking loop ─▶ centroid tracker @ camera rate + crossing gate │
 │   captures → JPEG + SQLite (offline) ; sync worker → HTTPS POST   │
 └────────────────────────────────────────────────────────────────────┘
                                    │ https://tracker.drnanoinc.com
@@ -36,24 +36,33 @@ same way (outbound POST), and the dashboard is behind HTTP Basic auth.
   when idle, so a crossing can never be missed entirely.
 - **Decoupled tracking.** A dedicated thread runs detection as fast as the CPU allows while
   the main loop tracks at the camera rate (10 fps). Between fresh detections the tracker is
-  fed an empty set and **ByteTrack's Kalman filter coasts** the tracks forward, so the
-  crossing test samples at 10 fps even when YOLO runs at only 3-6 fps.
-- **Crossing test.** A track must be ≥ `TRACKER_MIN_TRACK_AGE` frames old, have travelled
-  ≥ `TRACKER_MIN_TRAVEL_FRAC` of the frame height, and its centroid segment must
-  **intersect the drawn line segment** (so a fast vehicle that jumps clean over the line at
-  low fps still counts). Per-track cooldown via `CrossingGate`.
+  fed an empty set and **coasts** the tracks forward (constant velocity), so the crossing
+  test samples at 10 fps even when YOLO runs at only 3-6 fps.
+- **Centroid tracking, not IoU.** At 10 fps a fast vehicle can move farther than its own box
+  between samples, so IoU association (ByteTrack) loses it — often returning nothing after
+  the first frame, which made fast bikes uncountable. Association is instead by *predicted
+  centroid distance* (`TRACKER_ASSOC_FRAC`), so the prev→cur centroid segment can still be
+  tested against the line. This suits sparse traffic; it is not built for dense crowds.
+- **Crossing test (hysteresis).** Each track commits to a side of the line; a crossing
+  counts only when the centroid emerges ≥ `TRACKER_CROSS_MARGIN_FRAC` of the frame height
+  past the line on the other side, with its projection inside the drawn segment. This
+  rejects low-confidence boxes that jitter across the line while still catching fast
+  movers. A track must also be ≥ `TRACKER_MIN_TRACK_AGE` frames old, have travelled
+  ≥ `TRACKER_MIN_TRAVEL_FRAC` of the frame height, and respect a per-track cooldown
+  (`CrossingGate`).
 
 ## Layout
 
 | Path | Purpose |
 |------|---------|
-| `run.py` | Headless edge loop: ncnn detector + ByteTrack + crossing + capture + SQLite |
+| `run.py` | Headless edge loop: ncnn detector + centroid tracker + crossing + capture + SQLite |
 | `store.py` | Offline-first SQLite event store (+ retention prune) |
 | `sync.py` | HTTP upload worker (retries; deletes after ACK) |
 | `tools/export_model.py` | Export a YOLO `.pt` to ncnn at any input size |
 | `tools/make_calib.py` | Build an INT8 calibration set from ROI crops |
 | `tools/quantize_int8.py` | INT8-quantize an ncnn model (`ncnn2table`/`ncnn2int8`) |
-| `tools/live_push.py` | Dev harness that mimics `run.py` from a laptop |
+| `tools/live_push.py` | Dev harness that mimics `run.py` from a laptop (can push to the VPS) |
+| `tools/test_clip.py` | Run the production tracker/crossing over a video clip and report IN/OUT |
 | `web/` | Bun dashboard + ingest API (Drizzle + SQLite) |
 | `deploy/` | systemd units + env examples for the Pi |
 | `models/yolo26n_ncnn_320x320/` | Production model (fp32 + INT8), ROI-matched input |
@@ -74,7 +83,9 @@ On first boot DietPi runs `/boot/Automation_Custom_Script.sh`; logs land in
 sudo apt-get install -y python3-venv python3-pip
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/pip install --no-deps bytetracker==0.3.2   # declares torch but never imports it
+# ncnn pulls the GUI OpenCV; replace it with the headless build on a server:
+./venv/bin/pip uninstall -y opencv-python opencv-python-headless
+./venv/bin/pip install --no-cache-dir opencv-python-headless
 ```
 
 Copy `config.example.json` to `config.json` and set the RTSP URL, then run:
@@ -100,7 +111,10 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_MOTION_HOLD` | `60` | Seconds motion keeps detection armed |
 | `TRACKER_MOTION_HEARTBEAT` | `3` | Idle YOLO cadence (s) |
 | `TRACKER_MOTION_SCALE` / `_MIN_AREA` | `0.5` / `12` | Motion-gate sensitivity |
-| `TRACKER_MIN_TRACK_AGE` / `_MIN_TRAVEL_FRAC` | `2` / `0.02` | Crossing gate |
+| `TRACKER_MIN_TRACK_AGE` / `_MIN_TRAVEL_FRAC` | `1` / `0.02` | Crossing gate |
+| `TRACKER_CROSS_MARGIN_FRAC` | `0.015` | Hysteresis past the line (fraction of frame height) |
+| `TRACKER_ASSOC_FRAC` | `0.2` | Max centroid-association distance (fraction of frame width) |
+| `TRACKER_TRACK_MAX_AGE` | `25` | Frames a track coasts with no detection before dropping |
 | `TRACKER_RETENTION_DAYS` | `30` | Local capture/event retention |
 | `TRACKER_VULKAN` | `0` | Optional GPU compute (use fp32 model) |
 | `TRACKER_CAPTURE_PIPELINE` | – | GStreamer pipeline, e.g. Pi hardware `v4l2h264dec` |

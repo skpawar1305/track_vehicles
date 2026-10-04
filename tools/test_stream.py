@@ -19,7 +19,8 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from run import YoloNcnn, BYTETracker, _VEHICLE_NAMES
+from bytetracker import BYTETracker
+from run import YoloNcnn, _VEHICLE_NAMES
 
 COCO_NAMES = {0: "person", 1: "bicycle", 2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
 

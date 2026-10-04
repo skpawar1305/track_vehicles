@@ -2,9 +2,13 @@ ncnn
 opencv-python-headless
 numpy
 scipy
-lap
 requests
 
-# bytetracker is pure Python (numpy/scipy) but its metadata declares torch.
-# Install it without dependencies to avoid pulling in PyTorch:
-#   pip install --no-deps bytetracker==0.3.2
+# NOTE: ncnn's metadata declares the GUI build `opencv-python`, which needs
+# libxcb/libGL and fails on a headless DietPi. first-boot.sh uninstalls it and
+# force-reinstalls opencv-python-headless afterwards.
+#
+# The edge (run.py) uses its own centroid tracker and needs no tracking library.
+# Only the laptop dev harness tools/live_push.py needs `bytetracker==0.3.2`
+# (install with --no-deps; some wheels import torch and need its torch residue
+# stripped — see git history of deploy/first-boot.sh).

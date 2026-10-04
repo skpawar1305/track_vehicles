@@ -6,7 +6,6 @@ from queue import Queue, Empty, Full
 import cv2
 import numpy as np
 import ncnn
-from bytetracker import BYTETracker
 from store import Store
 
 MODEL_DIR = Path(__file__).resolve().parent / "models"
@@ -56,8 +55,10 @@ class Config:
         self.motion_min_area = int(os.environ.get("TRACKER_MOTION_MIN_AREA", "12"))
         self.motion_hold = float(os.environ.get("TRACKER_MOTION_HOLD", "60"))
         self.motion_heartbeat = float(os.environ.get("TRACKER_MOTION_HEARTBEAT", "3"))
-        self.min_track_age = int(os.environ.get("TRACKER_MIN_TRACK_AGE", "2"))
+        self.min_track_age = int(os.environ.get("TRACKER_MIN_TRACK_AGE", "1"))
         self.min_travel_frac = float(os.environ.get("TRACKER_MIN_TRAVEL_FRAC", "0.02"))
+        # Hysteresis past the line (fraction of frame height) to reject jitter.
+        self.cross_margin_frac = float(os.environ.get("TRACKER_CROSS_MARGIN_FRAC", "0.015"))
         self.running = True
         self._reconnect = False
         self.captures = []
@@ -155,6 +156,25 @@ cfg = Config()
 # ── Line crossing ─────────────────────────────────────────────────────
 CROSSING_NONE, CROSSING_IN, CROSSING_OUT = 0, 1, 2
 
+def line_geometry(line, point):
+    """Signed perpendicular distance (px) of `point` to `line`, and its
+    projection parameter t along the segment (0 at (x1,y1), 1 at (x2,y2)).
+
+    Returns (None, None) for a degenerate line/point.
+    """
+    if line is None or point is None:
+        return None, None
+    x1, y1, x2, y2 = line
+    dx, dy = x2 - x1, y2 - y1
+    l2 = dx * dx + dy * dy
+    if l2 <= 0:
+        return None, None
+    px, py = point
+    dist = (dx * (py - y1) - dy * (px - x1)) / (l2 ** 0.5)
+    t = ((px - x1) * dx + (py - y1) * dy) / l2
+    return dist, t
+
+
 def detect_crossing(line, old_centroid, new_centroid, flip=False):
     if line is None or old_centroid is None or new_centroid is None:
         return CROSSING_NONE
@@ -182,16 +202,43 @@ class CrossingGate:
         self.cooldown = cooldown
         self.first = {}
         self.last_cross = {}
+        self.side = {}        # tid -> last committed side (+1/-1) outside the band
 
     def update_first(self, tid, cen):
         if tid not in self.first:
             self.first[tid] = (float(cen[0]), float(cen[1]))
 
-    def drop(self, alive_ids):
-        for tid in list(self.first):
-            if tid not in alive_ids:
-                del self.first[tid]
-                self.last_cross.pop(tid, None)
+    def drop(self, dead_ids):
+        for tid in dead_ids:
+            self.first.pop(tid, None)
+            self.last_cross.pop(tid, None)
+            self.side.pop(tid, None)
+
+    def crossing(self, line, obj, flip=False, margin=0.0, seg_tol=0.02):
+        """Stateful line-crossing test with hysteresis.
+
+        Returns CROSSING_NONE/IN/OUT. A crossing is registered only when the
+        object's centroid moves from one committed side of the line to the
+        other, landing at least `margin` px past it, with the crossing point
+        inside the drawn segment. Committing to a side means a low-confidence
+        box whose centroid jitters across the line by a pixel or two never
+        registers a crossing.
+        """
+        dist, t = line_geometry(line, obj.centroid)
+        if dist is None:
+            return CROSSING_NONE
+        if abs(dist) < margin:
+            return CROSSING_NONE
+        new_side = 1 if dist >= 0 else -1
+        prev = self.side.get(obj.track_id)
+        self.side[obj.track_id] = new_side
+        if prev is None or prev == new_side:
+            return CROSSING_NONE
+        if t < -seg_tol or t > 1 + seg_tol:
+            return CROSSING_NONE
+        if flip:
+            return CROSSING_OUT if new_side == 1 else CROSSING_IN
+        return CROSSING_IN if new_side == 1 else CROSSING_OUT
 
     def allow(self, obj, now, frame_h):
         if obj.age < self.min_age:
@@ -666,7 +713,7 @@ def segment_crosses_line(line, old_centroid, new_centroid):
     o4 = side(ox, oy, nx, ny, bx, by)
     return (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0)
 
-# ── ByteTrack Tracker (bytetracker library via Kalman filter + Hungarian) ──
+# ── Centroid Tracker (low-fps safe) ───────────────────────────────────
 class TrackInfo:
     """Lightweight tracked object wrapper for crossing detection & annotation."""
     __slots__ = ('track_id', 'bbox', 'label', 'class_id', 'confidence', 'centroid',
@@ -682,6 +729,86 @@ class TrackInfo:
         self.age = age
         self.last_crossing_frame = -60
         self.last_crossing = None
+
+
+class CentroidTracker:
+    """Velocity-aware nearest-centroid tracker for low-fps streams.
+
+    The packaged BYTETracker associates boxes by IoU. On a 10 fps substream a
+    vehicle can move farther than its own box between two samples, so IoU is 0:
+    ByteTrack drops the track — often returning nothing for every frame after the
+    first — and the crossing age/travel gates can never be satisfied. This
+    associates by *predicted centroid distance* instead, so fast movers keep
+    their id and their prev->cur centroid segment can be tested against the line.
+    It is intentionally simple; it suits sparse scenes (a road, not a crowd).
+    """
+
+    def __init__(self, max_age=25, assoc_frac=0.2, vel_smooth=0.6):
+        self.tracks = {}          # id -> state
+        self.next_id = 1
+        self.max_age = max_age    # coasted frames before a track is dropped
+        self.assoc_frac = assoc_frac   # max association distance = frac * frame_w
+        self.vel_smooth = vel_smooth
+
+    def _info(self, tid, det, prev, cur, age):
+        return TrackInfo(tid, det['bbox'], det['label'], det['class_id'],
+                         det['confidence'], cur, prev, age)
+
+    def update(self, dets, w, h):
+        preds = {tid: (t['cen'][0] + t['vel'][0], t['cen'][1] + t['vel'][1])
+                 for tid, t in self.tracks.items()}
+        cand = []
+        for tid, (px, py) in preds.items():
+            for i, d in enumerate(dets):
+                cx, cy = d['centroid']
+                cand.append((((px - cx) ** 2 + (py - cy) ** 2) ** 0.5, tid, i))
+        cand.sort()
+
+        gate = self.assoc_frac * w
+        used_t, used_d, pairs = set(), set(), []
+        for dist, tid, i in cand:
+            if dist > gate or tid in used_t or i in used_d:
+                continue
+            used_t.add(tid); used_d.add(i); pairs.append((tid, i))
+
+        objects = []
+        for tid, i in pairs:
+            tr, det = self.tracks[tid], dets[i]
+            prev = tr['meas']
+            cur = det['centroid']
+            vx, vy = cur[0] - prev[0], cur[1] - prev[1]
+            ovx, ovy = tr['vel']
+            s = self.vel_smooth
+            tr['vel'] = (s * vx + (1 - s) * ovx, s * vy + (1 - s) * ovy)
+            tr['cen'] = tr['meas'] = cur
+            tr['age'] += 1
+            tr['missed'] = 0
+            tr['det'] = det
+            objects.append(self._info(tid, det, prev, cur, tr['age']))
+
+        # Coast tracks with no detection this frame (predicted position only).
+        for tid, tr in self.tracks.items():
+            if tid in used_t:
+                continue
+            tr['cen'] = (tr['cen'][0] + tr['vel'][0], tr['cen'][1] + tr['vel'][1])
+            tr['age'] += 1
+            tr['missed'] += 1
+            # prev_centroid=None marks a prediction so crossing is not evaluated.
+            objects.append(self._info(tid, tr['det'], None, tr['cen'], tr['age']))
+
+        # New tracks for unmatched detections.
+        for i, det in enumerate(dets):
+            if i in used_d:
+                continue
+            tid = self.next_id
+            self.next_id += 1
+            self.tracks[tid] = {'cen': det['centroid'], 'meas': det['centroid'],
+                                'vel': (0.0, 0.0), 'age': 0, 'missed': 0, 'det': det}
+            objects.append(self._info(tid, det, None, det['centroid'], 0))
+
+        for tid in [t for t, tr in self.tracks.items() if tr['missed'] > self.max_age]:
+            del self.tracks[tid]
+        return objects
 
 # ── Annotation ────────────────────────────────────────────────────────
 def annotate_frame(frame, line, roi, objects, counts, fps, det_count, flip_sides=False, simple=False):
@@ -734,12 +861,12 @@ class LatestFrame:
             return self._frame, self.seq
 
 
-def detect_loop(detector, det_classes, cfg, latest, shared, stop):
+def detect_loop(detector, cfg, latest, shared, stop):
     """Runs detection as fast as the CPU allows on the newest frame.
 
     Decoupled from the tracking loop: tracking/crossing proceeds at the camera's
     full sample rate even while a slow (YOLO) inference is still running, because
-    the tracker coasts on Kalman prediction between fresh detections.
+    the tracker coasts on velocity prediction between fresh detections.
     """
     last = -1
     while not stop.is_set():
@@ -752,11 +879,13 @@ def detect_loop(detector, det_classes, cfg, latest, shared, stop):
             continue
         h, w = frame.shape[:2]
         roi_px = cfg.pixel_roi(w, h)
+        # Read the class filter every frame so a remote config change applies live.
+        classes = None if cfg.detector == "motion" else cfg.enabled_classes
         try:
             if roi_px and len(roi_px) >= 3:
-                dets = detector.detect_roi(frame, roi_px, enabled_classes=det_classes)
+                dets = detector.detect_roi(frame, roi_px, enabled_classes=classes)
             else:
-                dets = detector.detect(frame, enabled_classes=det_classes)
+                dets = detector.detect(frame, enabled_classes=classes)
         except Exception as e:
             print("[detect] error:", e)
             continue
@@ -910,11 +1039,9 @@ def main():
 
     if cfg.detector == "motion":
         detector    = MotionDetector(scale=cfg.motion_scale, min_area=cfg.motion_min_area)
-        det_classes = None
         print(f"[main] Motion detector (scale={cfg.motion_scale}, min_area={cfg.motion_min_area})")
     elif cfg.detector == "yolo":
         detector    = YoloNcnn(conf_thresh=cfg.conf_thresh)
-        det_classes = cfg.enabled_classes
         print(f"[main] YOLO11 ncnn loaded ({YOLO_PARAM.split('/')[-2]}, {NUM_THREADS} threads)")
     else:
         detector    = HybridDetector(conf_thresh=cfg.conf_thresh,
@@ -922,22 +1049,21 @@ def main():
                                      motion_min_area=cfg.motion_min_area,
                                      hold_seconds=cfg.motion_hold,
                                      heartbeat=cfg.motion_heartbeat)
-        det_classes = cfg.enabled_classes
         print(f"[main] Hybrid detector: motion-gated YOLO11 "
               f"({YOLO_PARAM.split('/')[-2]}, {NUM_THREADS} threads)")
 
-    # Low-FPS friendly: permissive IoU association, long lost-track buffer.
-    tracker     = BYTETracker(track_thresh=cfg.conf_thresh, track_buffer=40,
-                              match_thresh=0.85, frame_rate=30)
+    # Low-FPS friendly: associate by predicted centroid distance, not IoU, so a
+    # fast vehicle that clears its own box between 10 fps samples keeps its id.
+    tracker     = CentroidTracker(
+        max_age=int(os.environ.get("TRACKER_TRACK_MAX_AGE", "25")),
+        assoc_frac=float(os.environ.get("TRACKER_ASSOC_FRAC", "0.2")))
     capture_mgr = CaptureManager(cfg.capture_dir, cfg.max_captures)
 
     # Offline-first event store (SQLite); survives restarts and outages
     store = Store(os.environ.get("TRACKER_DB_PATH", "events.db"))
 
-    # Tracked state per track_id for crossing detection
-    prev_centroids = {}
-    track_ages      = {}
     last_cross_info = {}
+    gate_ids        = set()
     cross_gate      = CrossingGate(min_age=cfg.min_track_age,
                                    min_travel_frac=cfg.min_travel_frac)
 
@@ -947,7 +1073,7 @@ def main():
 
     threading.Thread(target=reader_loop, args=(cfg, latest), daemon=True).start()
     threading.Thread(target=detect_loop,
-                     args=(detector, det_classes, cfg, latest, shared, stop), daemon=True).start()
+                     args=(detector, cfg, latest, shared, stop), daemon=True).start()
     print("[main] Reader + detect threads started")
 
     # Live relay to the VPS dashboard (optional; outbound POST)
@@ -998,7 +1124,7 @@ def main():
             roi_px  = cfg.pixel_roi(w, h)
 
             # Consume fresh detections if the detect thread produced any; else
-            # feed empty detections so ByteTrack coasts (Kalman) between updates.
+            # feed an empty list so the tracker coasts between detector updates.
             with shared["lock"]:
                 dcount = shared["counter"]
                 raw_detections = list(shared["dets"])
@@ -1008,40 +1134,17 @@ def main():
                 used_det = dcount
             det_count = len(raw_detections)
 
-            # Convert detections to BYTETracker format: [[x1,y1,x2,y2,score,cls_id], ...]
-            if raw_detections:
-                dets_array = np.array([[d['bbox'][0], d['bbox'][1], d['bbox'][2], d['bbox'][3],
-                                        d['confidence'], d['class_id']] for d in raw_detections],
-                                      dtype=np.float32)
-            else:
-                dets_array = np.empty((0, 6), dtype=np.float32)
+            # Update the centroid tracker with fresh detections (empty list just
+            # coasts tracks between detector updates).
+            objects = tracker.update(raw_detections, w, h)
 
-            tracked = tracker.update(dets_array, None)
-
-            # Convert BYTETracker output to list of tracked objects
-            objects = []
-            tracked_ids = set()
-            for t in tracked:
-                x1, y1, x2, y2, tid, cls_id, score = t
-                x1, y1, x2, y2, tid = int(x1), int(y1), int(x2), int(y2), int(tid)
-                tracked_ids.add(tid)
-                centroid = ((x1 + x2) // 2, (y1 + y2) // 2)
-                prev = prev_centroids.get(tid)
-                age = track_ages.get(tid, 0)
-                obj = TrackInfo(tid, (x1, y1, x2, y2),
-                                _VEHICLE_NAMES.get(int(cls_id), f'cls_{int(cls_id)}'),
-                                cls_id, float(score), centroid, prev, age)
-                objects.append(obj)
-                prev_centroids[tid] = centroid
-                track_ages[tid] = age + 1
-                cross_gate.update_first(tid, centroid)
-
-            # Clean up stale tracks
-            for tid in list(prev_centroids.keys()):
-                if tid not in tracked_ids:
-                    del prev_centroids[tid]
-                    del track_ages[tid]
-            cross_gate.drop(tracked_ids)
+            # Flicker gate keeps its "first seen" position per live track id.
+            present = set()
+            for obj in objects:
+                present.add(obj.track_id)
+                cross_gate.update_first(obj.track_id, obj.centroid)
+            cross_gate.drop(gate_ids - present)
+            gate_ids = present
 
             # Periodic rate report (tracking is decoupled from detection).
             if time.time() - stat_t >= 10:
@@ -1064,40 +1167,49 @@ def main():
                     try: live_q.put_nowait(jpeg.tobytes())
                     except Full: pass
 
+            debug = os.environ.get("TRACKER_DEBUG") == "1"
             for obj in objects:
-                if obj.prev_centroid and obj.age >= cfg.min_track_age:
-                    crossing = detect_crossing(line_px, obj.prev_centroid, obj.centroid,
-                                               flip=cfg.flip_sides)
-                    if crossing == CROSSING_NONE: continue
-                    # Motion segment must cross the drawn line segment itself
-                    if not segment_crosses_line(line_px, obj.prev_centroid, obj.centroid):
-                        continue
-                    # Reject flicker: needs real age + net travel + cooldown
-                    if not cross_gate.allow(obj, now_t, h):
-                        continue
-                    info = last_cross_info.get(obj.track_id, {'frame': -60, 'dir': None})
-                    if total_frames - info['frame'] < 15: continue
-                    last_cross_info[obj.track_id] = {'frame': total_frames, 'dir': crossing}
-                    direction = 'IN' if crossing == CROSSING_IN else 'OUT'
-                    # Save the RAW frame (no overlay) — usable as YOLO training data
-                    entry = capture_mgr.save(frame, obj.track_id, crossing, obj.bbox)
-                    cfg.add_capture(entry)
-                    store.add({
-                        "id": entry["filename"].rsplit(".", 1)[0],
-                        "track_id": obj.track_id,
-                        "class_id": obj.class_id,
-                        "label": obj.label,
-                        "confidence": obj.confidence,
-                        "direction": entry["direction"],
-                        "crossed_at": datetime.now(timezone.utc).isoformat(),
-                        "bbox": list(obj.bbox),
-                        "line": line_px,
-                        "image_path": entry["filename"],
-                        "thumb_path": entry["thumb"],
-                    })
-                    if crossing == CROSSING_IN: c_in += 1
-                    else:                       c_out += 1
-                    print(f"[cross] ID#{obj.track_id} {direction}")
+                if obj.age < cfg.min_track_age:
+                    if debug:
+                        print(f"[dbg] #{obj.track_id} {obj.label} age={obj.age} "
+                              f"c={obj.centroid} (wait)")
+                    continue
+                crossing = cross_gate.crossing(line_px, obj, flip=cfg.flip_sides,
+                                               margin=cfg.cross_margin_frac * h)
+                if debug:
+                    print(f"[dbg] #{obj.track_id} {obj.label} age={obj.age} c={obj.centroid} "
+                          f"side={cross_gate.side.get(obj.track_id)} cross={crossing}")
+                if crossing == CROSSING_NONE:
+                    continue
+                # Reject flicker: real age + net travel + cooldown
+                if not cross_gate.allow(obj, now_t, h):
+                    continue
+                info = last_cross_info.get(obj.track_id, {'frame': -60, 'dir': None})
+                if total_frames - info['frame'] < 15:
+                    continue
+                last_cross_info[obj.track_id] = {'frame': total_frames, 'dir': crossing}
+                direction = 'IN' if crossing == CROSSING_IN else 'OUT'
+                # Save the RAW frame (no overlay) — usable as YOLO training data
+                entry = capture_mgr.save(frame, obj.track_id, crossing, obj.bbox)
+                cfg.add_capture(entry)
+                store.add({
+                    "id": entry["filename"].rsplit(".", 1)[0],
+                    "track_id": obj.track_id,
+                    "class_id": obj.class_id,
+                    "label": obj.label,
+                    "confidence": obj.confidence,
+                    "direction": entry["direction"],
+                    "crossed_at": datetime.now(timezone.utc).isoformat(),
+                    "bbox": list(obj.bbox),
+                    "line": line_px,
+                    "image_path": entry["filename"],
+                    "thumb_path": entry["thumb"],
+                })
+                if crossing == CROSSING_IN:
+                    c_in += 1
+                else:
+                    c_out += 1
+                print(f"[cross] ID#{obj.track_id} {direction}")
 
     except KeyboardInterrupt:
         print("\n[main] Shutting down...")

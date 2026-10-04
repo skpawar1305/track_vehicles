@@ -10,6 +10,7 @@ Group=tracker
 WorkingDirectory=/opt/tracker
 EnvironmentFile=/etc/tracker/tracker.env
 EnvironmentFile=/etc/tracker/sync.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/tracker/venv/bin/python /opt/tracker/run.py
 Restart=always
 RestartSec=5
