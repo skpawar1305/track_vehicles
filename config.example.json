@@ -1,0 +1,17 @@
+{
+  "stream_url": "rtsp://user:password@nvr-ip:554/unicast/c11/s1/live",
+  "line": null,
+  "roi": null,
+  "norm_line": null,
+  "norm_roi": null,
+  "conf_thresh": 0.30,
+  "flip_sides": false,
+  "capture_dir": "captures",
+  "max_captures": 1000,
+  "enabled_classes": [
+    2,
+    3,
+    5,
+    7
+  ]
+}

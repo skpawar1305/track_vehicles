@@ -1,0 +1,15 @@
+[Unit]
+Description=Vehicle tracker web dashboard (Bun + Drizzle + SQLite)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/tracker/web
+EnvironmentFile=/etc/tracker/web.env
+ExecStart=/usr/local/bin/bun run /srv/tracker/web/server.ts
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

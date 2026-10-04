@@ -1,0 +1,14 @@
+{
+  "name": "tracker-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run server.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

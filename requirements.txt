@@ -1,4 +1,10 @@
+ncnn
 opencv-python-headless
-flask
 numpy
-onnxruntime
+scipy
+lap
+requests
+
+# bytetracker is pure Python (numpy/scipy) but its metadata declares torch.
+# Install it without dependencies to avoid pulling in PyTorch:
+#   pip install --no-deps bytetracker==0.3.2

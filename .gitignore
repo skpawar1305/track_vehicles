@@ -1,13 +1,45 @@
--
 __pycache__/
 *.pyc
 .env
+
+# local config (copy config.example.json -> config.json); holds RTSP credentials
+config.json
+
+# runtime data
 *.log
 captures/
 test_captures/
 *.jpg
 *.png
-models/yolo26n.pt
-models/yolo26n.onnx
+
+# offline store
+events.db
+events.db-wal
+events.db-shm
+*.db
+
+# model artifacts (rebuild with tools/export_model.py [+ tools/quantize_int8.py])
+models/*.pt
+models/*.onnx
+models/*.onnx.data
+models/*.pnnx.*
+models/*_pnnx.py
+models/*_ncnn.py
+models/*.ncnn.bin
+models/*.ncnn.param
+models/*_ncnn_model/
+models/nanodet*
+models/yolo11n_ncnn_*/
+models/yolo26n_ncnn_256x256/
+models/yolo26n_ncnn_256x416/
+models/yolo26n_ncnn_288x288/
+models/yolo26n_ncnn_320x512/
+models/yolo26n_ncnn_384x640/
+
+# web
+web/node_modules/
+web/.env
+
+# legacy
 rust_port/target/
 rust_port/config.json
