@@ -12,6 +12,14 @@ const DASH_PASS = process.env.DASH_PASS ?? "";
 const PORT = Number(process.env.PORT ?? 3010);
 const HOST = process.env.HOST ?? "127.0.0.1";
 
+// Dashboard display + day-bucketing timezone: IST (UTC+5:30). Timestamps are
+// stored in UTC; shift only for grouping/labels so calendar days and "today"
+// totals line up with local (IST) days. SQLite parses the ISO offset then adds
+// the shift.
+const IST_SHIFT = "+330 minutes";
+const istDay = (col: string) => `date(${col}, '${IST_SHIFT}')`;
+const istNow = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
+
 mkdirSync(`${CAPTURES_DIR}/thumb`, { recursive: true });
 
 const sqlite = new Database(DB_PATH, { create: true });
@@ -118,8 +126,10 @@ type EventRow = {
   track_id: number | null; crossed_at: string | null; created_at: string;
 };
 
-function dashboard(initialDay: string | null) {
-  const dayExpr = "date(COALESCE(crossed_at, created_at))";
+// Shared by the initial page render and GET /api/events so the calendar/history
+// views can auto-refresh without a reload.
+function loadEventData() {
+  const dayExpr = istDay("COALESCE(crossed_at, created_at)");
   const counts = sqlite
     .query("SELECT direction, COUNT(*) AS c FROM events GROUP BY direction")
     .all() as { direction: string; c: number }[];
@@ -140,6 +150,22 @@ function dashboard(initialDay: string | null) {
     id: r.id, label: r.label ?? "", dir: r.direction ?? "", track: r.track_id,
     ts: r.crossed_at || r.created_at || "",
   }));
+  return { cIn, cOut, dayStats, events };
+}
+
+function istTodayCounts() {
+  const tcnt = sqlite
+    .query(`SELECT direction, COUNT(*) AS c FROM events WHERE ${istDay("COALESCE(crossed_at, created_at)")} = ${istDay("'now'")} GROUP BY direction`)
+    .all() as { direction: string; c: number }[];
+  return {
+    date: istNow(),
+    in: tcnt.find((r) => r.direction === "in")?.c ?? 0,
+    out: tcnt.find((r) => r.direction === "out")?.c ?? 0,
+  };
+}
+
+function dashboard(view: "live" | "calendar" | "history", initialDay: string | null) {
+  const { cIn, cOut, dayStats, events } = loadEventData();
   const init = initialDay && /^\d{4}-\d{2}-\d{2}$/.test(initialDay) ? initialDay : null;
   const J = (o: unknown) => JSON.stringify(o).replace(/</g, "\\u003c");
 
@@ -196,12 +222,12 @@ main{max-width:860px;margin:0 auto;padding:12px}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
 figure{margin:0;background:#fff;border:1px solid var(--line);border-radius:14px;overflow:hidden}
 figure img{width:100%;display:block;aspect-ratio:16/9;object-fit:cover;background:#e5e7eb}
-figcaption{padding:7px 9px;font-size:12px;display:flex;justify-content:space-between;gap:6px}
-figcaption .t{color:var(--muted);font-size:11px}
+figcaption{padding:7px 9px;font-size:12px;display:flex;justify-content:space-between;align-items:center;gap:6px}
+figcaption .t{color:var(--text);font-size:16px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:.01em;white-space:nowrap}
 .empty2{color:var(--muted);text-align:center;padding:48px 20px}
 .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;background:rgba(255,255,255,.97);backdrop-filter:blur(10px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
-.tabbar button{flex:1;border:none;background:none;padding:14px 0;font-size:13px;color:var(--muted);cursor:pointer}
-.tabbar button.active{color:var(--blue);font-weight:700}
+.tabbar a{flex:1;text-align:center;text-decoration:none;padding:14px 0;font-size:13px;color:var(--muted);cursor:pointer}
+.tabbar a.active{color:var(--blue);font-weight:700}
 .sheet{position:fixed;inset:0;z-index:40;background:var(--bg);overflow:auto;padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom))}
 .sheet.hidden{display:none}
 .sheetbar{display:flex;align-items:center;margin-bottom:10px}
@@ -230,11 +256,11 @@ figcaption .t{color:var(--muted);font-size:11px}
   </div>
 </header>
 <main>
-  <section id="v-live" class="view">
+  <section id="v-live" class="view${view === "live" ? "" : " hidden"}">
     <div class="player"><img id="snap" alt="live"></div>
     <div class="sub">Tap the gear to edit the counting line / scan area</div>
   </section>
-  <section id="v-cal" class="view hidden">
+  <section id="v-cal" class="view${view === "calendar" ? "" : " hidden"}">
     <div class="calhead">
       <button class="icon" id="prevMonth">&#8249;</button>
       <div id="calTitle"></div>
@@ -243,16 +269,18 @@ figcaption .t{color:var(--muted);font-size:11px}
     </div>
     <div class="calgrid" id="calGrid"></div>
     <div class="hint"><b style="color:var(--green)">IN</b> / <b style="color:var(--red)">OUT</b> per day &middot; &#8592; / &#8594; change day &middot; tap a day for captures</div>
+    <div class="histhead" id="calHistHead" style="margin-top:16px"></div>
+    <div class="gallery" id="calDay"></div>
   </section>
-  <section id="v-hist" class="view hidden">
+  <section id="v-hist" class="view${view === "history" ? "" : " hidden"}">
     <div class="histhead" id="histHead"></div>
     <div class="gallery" id="hist"></div>
   </section>
 </main>
 <nav class="tabbar">
-  <button data-tab="v-live" class="active">Live</button>
-  <button data-tab="v-cal">Calendar</button>
-  <button data-tab="v-hist">History</button>
+  <a href="/live" class="tab${view === "live" ? " active" : ""}">Live</a>
+  <a href="/calendar" class="tab${view === "calendar" ? " active" : ""}">Calendar</a>
+  <a href="/history" class="tab${view === "history" ? " active" : ""}">History</a>
 </nav>
 <div class="sheet hidden" id="setup">
   <div class="sheetbar"><b>Camera setup</b><button class="icon" id="closeSetup">&#10005;</button></div>
@@ -271,9 +299,11 @@ figcaption .t{color:var(--muted);font-size:11px}
   <p class="hint">Line: tap 2 points. Area: tap points, tap the first point (or Save) to close. IN side: tap where traffic enters. Then Save.</p>
 </div>
 <script>
-const DAYS=${J(dayStats)};
-const EVENTS=${J(events)};
+let DAYS=${J(dayStats)};
+let EVENTS=${J(events)};
 const INIT=${J(init)};
+const VIEW=${J(view)};
+let TOTALS={in:${cIn},out:${cOut}};
 </script>
 <script>
 (function(){
@@ -282,8 +312,8 @@ var tk=todayKey(),tc=DAYS[tk]||{};
 document.getElementById('sIn').textContent=tc['in']||0;
 document.getElementById('sOut').textContent=tc.out||0;
 function clock(){var n=new Date();document.getElementById('todayLbl').textContent='Today · '+
-  n.toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short'})+' · '+
-  n.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit'});}
+  n.toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata',weekday:'short',day:'numeric',month:'short'})+' · '+
+  n.toLocaleTimeString('en-GB',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit'})+' IST';}
 clock();setInterval(clock,1000);
 // Keep the IN/OUT header counts live (they used to only render on page load).
 function refreshCounts(){fetch('/api/config',{cache:'no-store'})
@@ -312,18 +342,19 @@ function setLive(on){if(on===liveOn)return;liveOn=on;
   if(on){liveTick();pumpTimer=setInterval(liveTick,250);}
   else if(pumpTimer){clearInterval(pumpTimer);pumpTimer=null;}}
 var views=[].slice.call(document.querySelectorAll('.view'));
+// Each view is its own route (/live, /calendar, /history); the nav links do a
+// normal navigation, so we only reveal the route's view and toggle the live pump.
 function showTab(id){views.forEach(function(v){v.classList.toggle('hidden',v.id!==id);});
-  [].slice.call(document.querySelectorAll('.tabbar button')).forEach(function(b){b.classList.toggle('active',b.dataset.tab===id);});
   setLive(id==='v-live');
   window.scrollTo(0,0);}
-[].slice.call(document.querySelectorAll('.tabbar button')).forEach(function(b){b.onclick=function(){showTab(b.dataset.tab);};});
-showTab('v-live');
+showTab({live:'v-live',calendar:'v-cal',history:'v-hist'}[VIEW]||'v-live');
 var selDay=INIT;
 var view=INIT?new Date(INIT+'T00:00:00'):new Date();
 function pad(n){return String(n).padStart(2,'0');}
 function ymd(y,m,d){return y+'-'+pad(m+1)+'-'+pad(d);}
 var calGrid=document.getElementById('calGrid'),calTitle=document.getElementById('calTitle');
-function todayKey(){var n=new Date();return ymd(n.getFullYear(),n.getMonth(),n.getDate());}
+// All day keys on the dashboard are IST (UTC+5:30), matching the server.
+function todayKey(){return new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Kolkata'});}
 function atOrAfterCurrentMonth(){var n=new Date();return view.getFullYear()>n.getFullYear()||
   (view.getFullYear()===n.getFullYear()&&view.getMonth()>=n.getMonth());}
 function renderCal(){
@@ -339,35 +370,63 @@ function renderCal(){
       '<b class="ci">'+(c['in']||0)+'</b><b class="co">'+(c.out||0)+'</b></span></div>';}
   calGrid.innerHTML=h;
   [].slice.call(calGrid.querySelectorAll('[data-day]')).forEach(function(el){
-    el.onclick=function(){selDay=el.dataset.day;view=new Date(selDay+'T00:00:00');renderCal();renderHist();showTab('v-hist');};});
+    // Stay on /calendar: reveal the day's captures inline instead of jumping to /history.
+    el.onclick=function(){selDay=el.dataset.day;renderCal();renderCalDay();};});
   document.getElementById('nextMonth').disabled=atOrAfterCurrentMonth();
 }
+function selectDay(k){selDay=k;if(k)view=new Date(k+'T00:00:00');renderCal();renderHist();renderCalDay();}
 function shiftDay(n){var b=selDay?new Date(selDay+'T00:00:00'):new Date();b.setDate(b.getDate()+n);
   var k=ymd(b.getFullYear(),b.getMonth(),b.getDate());if(k>todayKey())return;
-  selDay=k;view=new Date(selDay+'T00:00:00');renderCal();renderHist();}
+  selectDay(k);}
 document.getElementById('prevMonth').onclick=function(){view.setMonth(view.getMonth()-1);renderCal();};
 document.getElementById('nextMonth').onclick=function(){if(atOrAfterCurrentMonth())return;view.setMonth(view.getMonth()+1);renderCal();};
-document.getElementById('todayBtn').onclick=function(){var t=new Date();selDay=ymd(t.getFullYear(),t.getMonth(),t.getDate());view=new Date(selDay+'T00:00:00');renderCal();renderHist();};
+document.getElementById('todayBtn').onclick=function(){selectDay(todayKey());};
 document.addEventListener('keydown',function(e){if(e.target&&/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;
   if(e.key==='ArrowLeft'){shiftDay(-1);e.preventDefault();}else if(e.key==='ArrowRight'){shiftDay(1);e.preventDefault();}});
 var hist=document.getElementById('hist'),histHead=document.getElementById('histHead');
-function fmt(ts){return (ts||'').replace('T',' ').slice(0,19);}
-function renderHist(){
-  var list=selDay?EVENTS.filter(function(e){return (e.ts||'').slice(0,10)===selDay;}):EVENTS;
-  var c=selDay?(DAYS[selDay]||{in:0,out:0}):{in:${cIn},out:${cOut}};
-  var ctrls=selDay?'<button class="pill" id="clearDay" style="margin-left:auto">All</button>':'';
-  histHead.innerHTML='<span class="d">'+(selDay?selDay:'All recent')+'</span>'+
+var calDay=document.getElementById('calDay'),calHistHead=document.getElementById('calHistHead');
+function istDay(ts){try{return new Date(ts).toLocaleDateString('sv-SE',{timeZone:'Asia/Kolkata'});}catch(e){return (ts||'').slice(0,10);}}
+function fmt(ts){try{return new Date(ts).toLocaleString('sv-SE',{timeZone:'Asia/Kolkata'});}catch(e){return (ts||'').replace('T',' ').slice(0,19);}}
+// Render a capture list into any (head, grid) pair. A day filters to one IST day.
+function renderList(day, headEl, gridEl){
+  var list=day?EVENTS.filter(function(e){return istDay(e.ts)===day;}):EVENTS;
+  var c=day?(DAYS[day]||{in:0,out:0}):{in:TOTALS.in,out:TOTALS.out};
+  var ctrls=day?'<button class="pill clearBtn" style="margin-left:auto">All</button>':'';
+  headEl.innerHTML='<span class="d">'+(day?day:'All recent')+'</span>'+
     '<span class="c"><b style="color:var(--green)">'+c['in']+' IN</b> &middot; <b style="color:var(--red)">'+c.out+' OUT</b></span>'+ctrls;
-  if(selDay)document.getElementById('clearDay').onclick=function(){selDay=null;renderCal();renderHist();};
-  hist.innerHTML=list.length?list.map(function(e){
+  if(day){var clr=headEl.querySelector('.clearBtn');if(clr)clr.onclick=function(){selectDay(null);};}
+  gridEl.innerHTML=list.length?list.map(function(e){
     var col=e.dir.toLowerCase()==='in'?'var(--green)':'var(--red)';
     return '<figure><a href="/img/'+encodeURIComponent(e.id)+'" target="_blank">'+
       '<img loading="lazy" src="/thumb/'+encodeURIComponent(e.id)+'" alt=""></a>'+
       '<figcaption><span style="color:'+col+';font-weight:700">'+(e.dir||'').toUpperCase()+' '+e.label+'</span>'+
-      '<span class="t">'+fmt(e.ts).slice(5,16)+'</span></figcaption></figure>';
+      '<span class="t">'+fmt(e.ts).slice(11,19)+'</span></figcaption></figure>';
   }).join(''):'<div class="empty2">No captures</div>';
 }
-renderCal();renderHist();
+function renderHist(){renderList(selDay,histHead,hist);}
+function renderCalDay(){
+  if(!selDay){calHistHead.innerHTML='';calDay.innerHTML='';return;}
+  renderList(selDay,calHistHead,calDay);
+}
+renderCal();renderHist();renderCalDay();
+// Calendar/History auto-refresh: poll the event feed and re-render only when
+// something actually changed (so images/scroll don't flicker). The live view
+// doesn't need it.
+if(VIEW!=='live'){
+  var lastTotal=EVENTS.length;
+  function refreshData(){
+    fetch('/api/events',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
+      .then(function(d){if(!d)return;
+        if(d.events)EVENTS=d.events;
+        if(d.days)DAYS=d.days;
+        if(d.counts)TOTALS=d.counts;
+        if(d.today){document.getElementById('sIn').textContent=d.today['in']||0;
+          document.getElementById('sOut').textContent=d.today.out||0;}
+        if(EVENTS.length!==lastTotal){lastTotal=EVENTS.length;renderCal();renderHist();renderCalDay();}})
+      .catch(function(){});
+  }
+  setInterval(refreshData,8000);
+}
 var setup=document.getElementById('setup'),S2=document.getElementById('snap2'),O=document.getElementById('ov'),msg=document.getElementById('msg');
 document.getElementById('setupBtn').onclick=function(){setup.classList.remove('hidden');S2.src='/live.jpg?'+Date.now();};
 document.getElementById('closeSetup').onclick=function(){setup.classList.add('hidden');};
@@ -506,16 +565,16 @@ Bun.serve({
       const allIn = cnt.find((r) => r.direction === "in")?.c ?? 0;
       const allOut = cnt.find((r) => r.direction === "out")?.c ?? 0;
       // Today's totals so the dashboard header can refresh without a reload.
-      const dayExpr = "date(COALESCE(crossed_at, created_at))";
+      const dayExpr = istDay("COALESCE(crossed_at, created_at)");
       const tcnt = sqlite
-        .query(`SELECT direction, COUNT(*) AS c FROM events WHERE ${dayExpr} = date('now') GROUP BY direction`)
+        .query(`SELECT direction, COUNT(*) AS c FROM events WHERE ${dayExpr} = ${istDay("'now'")} GROUP BY direction`)
         .all() as { direction: string; c: number }[];
       const tIn = tcnt.find((r) => r.direction === "in")?.c ?? 0;
       const tOut = tcnt.find((r) => r.direction === "out")?.c ?? 0;
       return Response.json({
         ...getConfig(), viewers: liveViewers, live_wanted,
         counts: { in: allIn, out: allOut },
-        today: { date: new Date().toISOString().slice(0, 10), in: tIn, out: tOut },
+        today: { date: istNow(), in: tIn, out: tOut },
       });
     }
     if (url.pathname === "/api/config" && req.method === "POST") {
@@ -549,6 +608,15 @@ Bun.serve({
 
     // Browser routes — Basic auth
     if (!basicOk(req)) return unauthorized();
+
+    // Event feed for the calendar/history auto-refresh.
+    if (url.pathname === "/api/events") {
+      const { cIn, cOut, dayStats, events } = loadEventData();
+      return Response.json({
+        events, days: dayStats, counts: { in: cIn, out: cOut },
+        today: istTodayCounts(),
+      });
+    }
 
     if (url.pathname === "/live.jpg") {
       liveJpgAt = Date.now();
@@ -612,14 +680,18 @@ Bun.serve({
       });
     }
 
-    if (url.pathname === "/")
-      return new Response(dashboard(url.searchParams.get("day")), {
+    if (url.pathname === "/") return Response.redirect("/live", 302);
+    if (url.pathname === "/live" || url.pathname === "/calendar" || url.pathname === "/history") {
+      const view = url.pathname.slice(1) as "live" | "calendar" | "history";
+      const day = url.searchParams.get("day") ?? url.searchParams.get("d");
+      return new Response(dashboard(view, day), {
         headers: {
           "content-type": "text/html; charset=utf-8",
           "cache-control": "no-store, no-cache, must-revalidate",
           "pragma": "no-cache",
         },
       });
+    }
     if (url.pathname.startsWith("/img/")) return serveImage(decodeURIComponent(url.pathname.slice(5)), false);
     if (url.pathname.startsWith("/thumb/")) return serveImage(decodeURIComponent(url.pathname.slice(7)), true);
     return new Response("not found", { status: 404 });

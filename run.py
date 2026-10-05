@@ -411,8 +411,10 @@ class NanoDetNcnn:
             return self.detect(frame, enabled_classes)
         h, w = frame.shape[:2]
         pts = np.array(roi_points, dtype=np.int32)
-        cx1, cy1 = max(0, pts[:, 0].min()), max(0, pts[:, 1].min())
-        cx2, cy2 = min(w, pts[:, 0].max()), min(h, pts[:, 1].max())
+        # int(): numpy min()/max() leak np.int32 offsets into every bbox, which
+        # later blows up json.dumps() when the crossing is persisted.
+        cx1, cy1 = int(max(0, pts[:, 0].min())), int(max(0, pts[:, 1].min()))
+        cx2, cy2 = int(min(w, pts[:, 0].max())), int(min(h, pts[:, 1].max()))
         if cx2 <= cx1 or cy2 <= cy1: return []
         return self._run_on_roi(frame[cy1:cy2, cx1:cx2], enabled_classes, cx1, cy1)
 
@@ -539,8 +541,10 @@ class YoloNcnn:
             return self.detect(frame, enabled_classes)
         h, w = frame.shape[:2]
         pts = np.array(roi_points, dtype=np.int32)
-        cx1, cy1 = max(0, pts[:, 0].min()), max(0, pts[:, 1].min())
-        cx2, cy2 = min(w, pts[:, 0].max()), min(h, pts[:, 1].max())
+        # int(): numpy min()/max() leak np.int32 offsets into every bbox, which
+        # later blows up json.dumps() when the crossing is persisted.
+        cx1, cy1 = int(max(0, pts[:, 0].min())), int(max(0, pts[:, 1].min()))
+        cx2, cy2 = int(min(w, pts[:, 0].max())), int(min(h, pts[:, 1].max()))
         if cx2 <= cx1 or cy2 <= cy1:
             return []
         return self._run_on_roi(frame[cy1:cy2, cx1:cx2], enabled_classes, cx1, cy1)
@@ -743,32 +747,72 @@ class CentroidTracker:
     It is intentionally simple; it suits sparse scenes (a road, not a crowd).
     """
 
-    def __init__(self, max_age=25, assoc_frac=0.2, vel_smooth=0.6):
+    def __init__(self, max_age=25, assoc_frac=0.2, vel_smooth=0.6,
+                 gap_frac=0.5, gap_max_frac=1.0, vel_reset=0.4, pred_cap=0.5,
+                 debug=False):
         self.tracks = {}          # id -> state
         self.next_id = 1
         self.max_age = max_age    # coasted frames before a track is dropped
-        self.assoc_frac = assoc_frac   # max association distance = frac * frame_w
+        self.assoc_frac = assoc_frac   # baseline association distance = frac * frame_w
         self.vel_smooth = vel_smooth
+        # A frozen/reconnected stream delivers the next frame seconds later, by
+        # which time the vehicle has moved far more than one frame's worth. Widen
+        # the association gate with the elapsed gap and extrapolate by wall-clock
+        # so the track (and its crossing side history) survives the gap.
+        self.gap_frac = gap_frac        # extra gate per second of gap = frac * frame_w
+        self.gap_max_frac = gap_max_frac  # cap, as a fraction of the frame diagonal
+        self.vel_reset = vel_reset      # gap (s) after which velocity is re-measured
+        # Cap extrapolation: over a multi-second gap the pre-gap velocity is stale
+        # and linear extrapolation can fling the prediction clean off-frame, so far
+        # from the real detection that even a widened gate misses it. Extrapolating
+        # at most `pred_cap` seconds keeps the anchor near the vehicle; the widened
+        # gate then re-acquires it wherever it actually is.
+        self.pred_cap = pred_cap
+        self.debug = debug
 
     def _info(self, tid, det, prev, cur, age):
         return TrackInfo(tid, det['bbox'], det['label'], det['class_id'],
                          det['confidence'], cur, prev, age)
 
-    def update(self, dets, w, h):
-        preds = {tid: (t['cen'][0] + t['vel'][0], t['cen'][1] + t['vel'][1])
-                 for tid, t in self.tracks.items()}
+    def _advance(self, t, dt):
+        """Extrapolate a track by at most `pred_cap` seconds of its velocity."""
+        dt = min(dt, self.pred_cap)
+        return (t['cen'][0] + t['vel'][0] * dt,
+                t['cen'][1] + t['vel'][1] * dt)
+
+    def update(self, dets, w, h, now=None):
+        if now is None:
+            now = time.time()
+        # Predict each track's centroid. Velocity is px/second, so time spent
+        # coasting (including a multi-second stream gap) is extrapolated
+        # correctly rather than treated as a single frame of motion.
+        preds = {}
+        for tid, t in self.tracks.items():
+            dt = now - t['last_t']
+            if dt < 0.0:
+                dt = 0.0
+            px, py = self._advance(t, dt)
+            preds[tid] = (px, py, dt)
         cand = []
-        for tid, (px, py) in preds.items():
+        for tid, (px, py, dt) in preds.items():
             for i, d in enumerate(dets):
                 cx, cy = d['centroid']
-                cand.append((((px - cx) ** 2 + (py - cy) ** 2) ** 0.5, tid, i))
+                cand.append((((px - cx) ** 2 + (py - cy) ** 2) ** 0.5, tid, i, dt))
         cand.sort()
 
-        gate = self.assoc_frac * w
+        base = self.assoc_frac * w
+        diag = (w * w + h * h) ** 0.5
+        max_gate = max(base, self.gap_max_frac * diag)
         used_t, used_d, pairs = set(), set(), []
-        for dist, tid, i in cand:
-            if dist > gate or tid in used_t or i in used_d:
+        for dist, tid, i, dt in cand:
+            if tid in used_t or i in used_d:
                 continue
+            gate = min(base + self.gap_frac * w * dt, max_gate)
+            if dist > gate:
+                continue
+            if dt >= 1.0 and self.debug:
+                print(f"[track] re-acquired #{tid} after {dt:.1f}s gap "
+                      f"(dist={dist:.0f} gate={gate:.0f})")
             used_t.add(tid); used_d.add(i); pairs.append((tid, i))
 
         objects = []
@@ -776,11 +820,18 @@ class CentroidTracker:
             tr, det = self.tracks[tid], dets[i]
             prev = tr['meas']
             cur = det['centroid']
-            vx, vy = cur[0] - prev[0], cur[1] - prev[1]
-            ovx, ovy = tr['vel']
-            s = self.vel_smooth
-            tr['vel'] = (s * vx + (1 - s) * ovx, s * vy + (1 - s) * ovy)
+            dt = now - tr['meas_t']
+            if dt <= 1e-3:
+                dt = 1e-3
+            vx, vy = (cur[0] - prev[0]) / dt, (cur[1] - prev[1]) / dt
+            if dt > self.vel_reset:      # long gap: trust the fresh average
+                tr['vel'] = (vx, vy)
+            else:
+                s = self.vel_smooth
+                tr['vel'] = (s * vx + (1 - s) * tr['vel'][0],
+                             s * vy + (1 - s) * tr['vel'][1])
             tr['cen'] = tr['meas'] = cur
+            tr['last_t'] = tr['meas_t'] = now
             tr['age'] += 1
             tr['missed'] = 0
             tr['det'] = det
@@ -790,7 +841,11 @@ class CentroidTracker:
         for tid, tr in self.tracks.items():
             if tid in used_t:
                 continue
-            tr['cen'] = (tr['cen'][0] + tr['vel'][0], tr['cen'][1] + tr['vel'][1])
+            dt = now - tr['last_t']
+            if dt < 0.0:
+                dt = 0.0
+            tr['cen'] = self._advance(tr, dt)
+            tr['last_t'] = now
             tr['age'] += 1
             tr['missed'] += 1
             # prev_centroid=None marks a prediction so crossing is not evaluated.
@@ -803,7 +858,8 @@ class CentroidTracker:
             tid = self.next_id
             self.next_id += 1
             self.tracks[tid] = {'cen': det['centroid'], 'meas': det['centroid'],
-                                'vel': (0.0, 0.0), 'age': 0, 'missed': 0, 'det': det}
+                                'vel': (0.0, 0.0), 'age': 0, 'missed': 0, 'det': det,
+                                'last_t': now, 'meas_t': now}
             objects.append(self._info(tid, det, None, det['centroid'], 0))
 
         for tid in [t for t, tr in self.tracks.items() if tr['missed'] > self.max_age]:
@@ -844,21 +900,29 @@ def annotate_frame(frame, line, roi, objects, counts, fps, det_count, flip_sides
     return frame
 
 class LatestFrame:
-    """Thread-safe holder for the most recent frame (reader -> detect + tracking)."""
+    """Thread-safe holder for the most recent frame (reader -> detect + tracking).
+
+    `fresh` is False for a frame the NVR repeated verbatim while the stream was
+    stalled. Consumers keep relaying it (so the dashboard does not time out) but
+    must not advance the tracker on it, or wall-clock-time-based velocity decays
+    to zero and the next genuinely-new frame looks like an unexplained jump.
+    """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._frame = None
         self.seq = 0
+        self.fresh = True
 
-    def put(self, frame):
+    def put(self, frame, fresh=True):
         with self._lock:
             self._frame = frame
+            self.fresh = fresh
             self.seq += 1
 
     def get(self):
         with self._lock:
-            return self._frame, self.seq
+            return self._frame, self.seq, self.fresh
 
 
 def detect_loop(detector, cfg, latest, shared, stop):
@@ -870,11 +934,13 @@ def detect_loop(detector, cfg, latest, shared, stop):
     """
     last = -1
     while not stop.is_set():
-        frame, seq = latest.get()
+        frame, seq, fresh = latest.get()
         if frame is None or seq == last:
             time.sleep(0.005)
             continue
         last = seq
+        if not fresh:                        # NVR repeat; don't burn CPU on it
+            continue
         if float(frame.std()) <= 5:          # warm-up / dead frames
             continue
         h, w = frame.shape[:2]
@@ -903,6 +969,7 @@ def reader_loop(cfg, latest):
     cap = None
     last_read_t = 0.0
     read_interval = 0.0
+    prev_gray = None
 
     while cfg.running:
         if cap is not None and cfg.check_reconnect():
@@ -941,8 +1008,19 @@ def reader_loop(cfg, latest):
             print("[reader] Stream lost, reconnecting...")
             cap.release(); cap = None; time.sleep(1); continue
 
+        # Flag frames the NVR repeats while stalled. A repeated frame is
+        # bit-identical, so *no* pixels change; count significantly-changed pixels
+        # (rather than a mean) so even a small/distant mover still reads as fresh.
         # Copy so the decoder can't overwrite the buffer a consumer still holds.
-        latest.put(frame.copy())
+        small = cv2.resize(frame, (320, 180), interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        if prev_gray is None:
+            fresh = True
+        else:
+            changed = int((cv2.absdiff(gray, prev_gray) > 6).sum())
+            fresh = changed > 3
+        prev_gray = gray
+        latest.put(frame.copy(), fresh)
 
     if cap is not None:
         cap.release()
@@ -1056,7 +1134,12 @@ def main():
     # fast vehicle that clears its own box between 10 fps samples keeps its id.
     tracker     = CentroidTracker(
         max_age=int(os.environ.get("TRACKER_TRACK_MAX_AGE", "25")),
-        assoc_frac=float(os.environ.get("TRACKER_ASSOC_FRAC", "0.2")))
+        assoc_frac=float(os.environ.get("TRACKER_ASSOC_FRAC", "0.2")),
+        gap_frac=float(os.environ.get("TRACKER_ASSOC_GAP_FRAC", "0.5")),
+        gap_max_frac=float(os.environ.get("TRACKER_ASSOC_MAX_FRAC", "1.0")),
+        vel_reset=float(os.environ.get("TRACKER_VEL_RESET", "0.4")),
+        pred_cap=float(os.environ.get("TRACKER_ASSOC_PRED_CAP", "0.5")),
+        debug=os.environ.get("TRACKER_DEBUG") == "1")
     capture_mgr = CaptureManager(cfg.capture_dir, cfg.max_captures)
 
     # Offline-first event store (SQLite); survives restarts and outages
@@ -1106,10 +1189,12 @@ def main():
     stat_t = time.time()
     stat_frames = 0
     stat_dets = 0
+    objects = []          # carried across stalled (repeated) frames for the live feed
+    prev_frame_t = 0.0
 
     try:
         while cfg.running:
-            frame, fseq = latest.get()
+            frame, fseq, fresh = latest.get()
             if frame is None or fseq == last_frame_seq:
                 time.sleep(0.01)
                 continue
@@ -1117,34 +1202,50 @@ def main():
             if float(frame.std()) <= 5:
                 continue
 
-            total_frames += 1
-
+            now_t = time.time()
             h, w = frame.shape[:2]
             line_px = cfg.pixel_line(w, h)
             roi_px  = cfg.pixel_roi(w, h)
 
-            # Consume fresh detections if the detect thread produced any; else
-            # feed an empty list so the tracker coasts between detector updates.
-            with shared["lock"]:
-                dcount = shared["counter"]
-                raw_detections = list(shared["dets"])
-            if dcount == used_det:
-                raw_detections = []
-            else:
-                used_det = dcount
-            det_count = len(raw_detections)
+            if fresh:
+                if prev_frame_t and now_t - prev_frame_t > 2.5:
+                    print(f"[gap] no new frames for {now_t - prev_frame_t:.1f}s")
+                prev_frame_t = now_t
+                total_frames += 1
 
-            # Update the centroid tracker with fresh detections (empty list just
-            # coasts tracks between detector updates).
-            objects = tracker.update(raw_detections, w, h)
+                # Consume fresh detections if the detect thread produced any; else
+                # feed an empty list so the tracker coasts between detector updates.
+                with shared["lock"]:
+                    dcount = shared["counter"]
+                    raw_detections = list(shared["dets"])
+                if dcount == used_det:
+                    raw_detections = []
+                else:
+                    used_det = dcount
 
-            # Flicker gate keeps its "first seen" position per live track id.
-            present = set()
-            for obj in objects:
-                present.add(obj.track_id)
-                cross_gate.update_first(obj.track_id, obj.centroid)
-            cross_gate.drop(gate_ids - present)
-            gate_ids = present
+                # Update the centroid tracker with fresh detections (empty list
+                # just coasts tracks between detector updates).
+                objects = tracker.update(raw_detections, w, h, now=now_t)
+
+                # Flicker gate keeps its "first seen" position per live track id.
+                present = set()
+                for obj in objects:
+                    present.add(obj.track_id)
+                    cross_gate.update_first(obj.track_id, obj.centroid)
+                cross_gate.drop(gate_ids - present)
+                gate_ids = present
+
+            # Push annotated frame to the VPS live feed (~5 fps, non-blocking).
+            # Keep doing this even on a repeated frame so a static scene does not
+            # time out the dashboard (it only relays, it does not track).
+            if live_url and cfg.live_wanted and now_t - last_live >= 0.2:
+                last_live = now_t
+                ann = annotate_live(frame, line_px, objects, {"in": c_in, "out": c_out},
+                                    roi=roi_px, flip=cfg.flip_sides)
+                ok, jpeg = cv2.imencode('.jpg', ann, [cv2.IMWRITE_JPEG_QUALITY, LIVE_QUALITY])
+                if ok:
+                    try: live_q.put_nowait(jpeg.tobytes())
+                    except Full: pass
 
             # Periodic rate report (tracking is decoupled from detection).
             if time.time() - stat_t >= 10:
@@ -1155,17 +1256,8 @@ def main():
                       f"detect={(dc - stat_dets) / el:.1f} fps  tracks={len(objects)}")
                 stat_t, stat_frames, stat_dets = time.time(), total_frames, dc
 
-            # Push annotated frame to the VPS live feed (~5 fps, non-blocking).
-            # Only encode/upload while someone is actually watching the dashboard.
-            now_t = time.time()
-            if live_url and cfg.live_wanted and now_t - last_live >= 0.2:
-                last_live = now_t
-                ann = annotate_live(frame, line_px, objects, {"in": c_in, "out": c_out},
-                                    roi=roi_px, flip=cfg.flip_sides)
-                ok, jpeg = cv2.imencode('.jpg', ann, [cv2.IMWRITE_JPEG_QUALITY, LIVE_QUALITY])
-                if ok:
-                    try: live_q.put_nowait(jpeg.tobytes())
-                    except Full: pass
+            if not fresh:
+                continue
 
             debug = os.environ.get("TRACKER_DEBUG") == "1"
             for obj in objects:

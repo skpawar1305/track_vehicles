@@ -131,11 +131,23 @@ bun run server.ts
 Exposed through the Cloudflare Tunnel as `tracker.drnanoinc.com` → `http://localhost:3010`.
 Install with `web/deploy/tracker-web.service`.
 
-- **Browser auth:** dashboard routes (`/`, `/img/*`, `/thumb/*`, `/live.jpg`) use HTTP Basic.
+Pages (each its own URL; `/` redirects to `/live`):
+
+| Route | Contents |
+|-------|----------|
+| `/live` | MJPEG/snapshot live view + setup editor |
+| `/calendar` | Month grid of per-day IN/OUT; tap a day to reveal its captures inline |
+| `/history` | Capture list, optionally filtered by `?day=YYYY-MM-DD` |
+
+- **Timezone:** timestamps are stored in UTC but displayed and day-bucketed in **IST**
+  (UTC+5:30), so calendar days and "today" totals line up with local midnight.
+- **Browser auth:** dashboard routes (`/live`, `/calendar`, `/history`, `/img/*`,
+  `/thumb/*`, `/live.jpg`) use HTTP Basic.
 - **Machine auth:** `/api/ingest`, `/api/live`, and `GET /api/config` accept the `TRACKER_TOKEN` bearer.
 - **Live feed:** the Pi POSTs annotated frames to `/api/live` only while a viewer is present
   (`live_wanted`); the page polls `/live.jpg` snapshots (self-recovering after restarts).
-- The header IN/OUT counts refresh live from `GET /api/config` (`today` totals).
+- **Auto-refresh:** the calendar and history views poll `GET /api/events` every 8 s and
+  re-render only when the event count changes; the header counts refresh from `GET /api/config`.
 
 ### Ingest contract
 

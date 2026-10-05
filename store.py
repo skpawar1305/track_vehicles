@@ -38,7 +38,23 @@ class Store:
         )
         self.conn.commit()
 
+    @staticmethod
+    def _json_safe(v):
+        """Coerce numpy scalars (np.int32/float32) to plain Python types.
+
+        A numpy value that reaches json.dumps() raises and — because the edge
+        persists inline in its main loop — takes the whole process down, losing
+        the crossing. Never let that happen.
+        """
+        def norm(o):
+            if isinstance(o, (list, tuple)):
+                return [norm(x) for x in o]
+            return o.item() if hasattr(o, "item") else o
+        return norm(v)
+
     def add(self, ev):
+        bbox = ev.get("bbox")
+        line = ev.get("line")
         with self.lock:
             self.conn.execute(
                 """INSERT OR IGNORE INTO events
@@ -49,8 +65,8 @@ class Store:
                     ev["id"], ev.get("track_id"), ev.get("class_id"),
                     ev.get("label"), ev.get("confidence"), ev.get("direction"),
                     ev.get("crossed_at") or datetime.now(timezone.utc).isoformat(),
-                    json.dumps(ev.get("bbox")) if ev.get("bbox") is not None else None,
-                    json.dumps(ev.get("line")) if ev.get("line") is not None else None,
+                    json.dumps(self._json_safe(bbox)) if bbox is not None else None,
+                    json.dumps(self._json_safe(line)) if line is not None else None,
                     ev.get("image_path"), ev.get("thumb_path"),
                 ),
             )
