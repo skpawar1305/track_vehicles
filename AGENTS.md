@@ -64,3 +64,10 @@
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads
   them live, so no restart is needed. Dumpers = COCO class 7 (truck).
+- **`/terminal` is a reverse WebSocket, not inbound SSH.** `term_agent.py` dials the VPS
+  (`/api/term?role=agent`, Bearer) and bridges the socket to a local PTY; the browser
+  attaches with a short-lived token from the Basic-auth page. Keep it outbound-only —
+  never add a port-forward or bind the Pi. It is gated by `ENABLE_TERMINAL=1`, runs as
+  the unprivileged `tracker` user, and xterm.js is self-hosted from `node_modules`
+  (no CDN). WebSocketApp's send is thread-safe (`enable_multithread`), so the PTY pump
+  thread may write while `run_forever` reads.

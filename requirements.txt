@@ -3,6 +3,8 @@ opencv-python-headless
 numpy
 scipy
 requests
+# Reverse terminal agent (term_agent.py): outbound WebSocket -> dashboard.
+websocket-client
 
 # NOTE: ncnn's metadata declares the GUI build `opencv-python`, which needs
 # libxcb/libGL and fails on a headless DietPi. first-boot.sh uninstalls it and

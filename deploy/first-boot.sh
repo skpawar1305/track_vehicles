@@ -30,7 +30,8 @@ chown -R tracker:tracker /opt/tracker
 
 install -m 0644 /opt/tracker/deploy/tracker.service /etc/systemd/system/tracker.service
 install -m 0644 /opt/tracker/deploy/sync.service /etc/systemd/system/sync.service
+install -m 0644 /opt/tracker/deploy/term-agent.service /etc/systemd/system/term-agent.service
 systemctl daemon-reload
-systemctl enable tracker.service sync.service
+systemctl enable tracker.service sync.service term-agent.service
 
 echo "==== tracker install done: $(date) ===="

@@ -11,6 +11,9 @@ const DASH_USER = process.env.DASH_USER ?? "";
 const DASH_PASS = process.env.DASH_PASS ?? "";
 const PORT = Number(process.env.PORT ?? 3010);
 const HOST = process.env.HOST ?? "127.0.0.1";
+// A browser shell into the edge is powerful and risky, so /terminal is opt-in:
+// set ENABLE_TERMINAL=1 in /etc/tracker/web.env to turn it on.
+const ENABLE_TERMINAL = process.env.ENABLE_TERMINAL === "1";
 
 // Dashboard display + day-bucketing timezone: IST (UTC+5:30). Timestamps are
 // stored in UTC; shift only for grouping/labels so calendar days and "today"
@@ -92,6 +95,102 @@ let liveAt = 0;
 let liveSeq = 0;
 let liveViewers = 0;   // active /live.mjpg clients
 let liveJpgAt = 0;     // last /live.jpg request (setup editor snapshot)
+
+// ── Web terminal (reverse WebSocket: Pi dials out, browser drives it) ───
+// The Pi is behind NAT and only makes outbound connections, so the edge agent
+// registers itself here (`/api/term?role=agent`, Bearer token); browsers attach
+// with a short-lived one-time token minted by the Basic-auth /terminal page.
+// Browser keystrokes and agent PTY output are relayed verbatim; resize control
+// frames are \x01-prefixed JSON so they can't be confused with typed input.
+type TermRole = "agent" | "browser";
+type TermData = { role: TermRole };
+let agentSocket: ServerWebSocket<TermData> | null = null;
+const browserSockets = new Set<ServerWebSocket<TermData>>();
+const termTokens = new Map<string, number>();
+
+function issueTermToken() {
+  const t = crypto.randomUUID().replace(/-/g, "");
+  const now = Date.now();
+  for (const [k, exp] of termTokens) if (exp < now) termTokens.delete(k);
+  termTokens.set(t, now + 120_000);
+  return t;
+}
+function termTokenOk(t: string | null) {
+  if (!t) return false;
+  const exp = termTokens.get(t);
+  return !!exp && exp > Date.now();
+}
+
+// xterm.js is self-hosted from node_modules so the page has no CDN dependency.
+const TERM_ASSETS: Record<string, string> = {
+  "xterm.js": "@xterm/xterm/lib/xterm.js",
+  "xterm.css": "@xterm/xterm/css/xterm.css",
+  "addon-fit.js": "@xterm/addon-fit/lib/addon-fit.js",
+};
+function serveTermAsset(name: string) {
+  const rel = TERM_ASSETS[name];
+  if (!rel) return new Response("not found", { status: 404 });
+  return new Response(Bun.file(`${import.meta.dir}/node_modules/${rel}`));
+}
+
+function terminalPage(token: string) {
+  return `<!doctype html><html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>Terminal · Vehicle Tracker</title>
+<link rel="stylesheet" href="/terminal/xterm.css">
+<style>
+html,body{margin:0;height:100%;background:#0b0f14;color:#e5e7eb;font:14px system-ui,sans-serif;overflow:hidden}
+#top{display:flex;align-items:center;gap:10px;padding:9px 12px;background:#111827;border-bottom:1px solid #1f2937}
+#top b{font-size:14px}
+#top a{color:#60a5fa;text-decoration:none;font-size:12px}
+#st{margin-left:auto;font-size:12px;color:#9ca3af;display:flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%;background:#6b7280}
+.dot.on{background:#16a34a}
+#term{position:absolute;inset:42px 0 0 0;padding:6px}
+</style></head><body>
+<div id="top"><b>tracker-pi</b><a href="/live">&larr; dashboard</a>
+  <div id="st"><span class="dot" id="dot"></span><span id="txt">connecting&hellip;</span></div></div>
+<div id="term"></div>
+<script src="/terminal/xterm.js"></script>
+<script src="/terminal/addon-fit.js"></script>
+<script>
+(function(){
+  var term=new Terminal({cursorBlink:true,fontSize:14,scrollback:5000,
+    theme:{background:'#0b0f14',foreground:'#e5e7eb'}});
+  var fit=new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('term'));
+  var dot=document.getElementById('dot'),txt=document.getElementById('txt');
+  var ws=null,stopped=false;
+  var ctrl=function(o){return '\\x01'+JSON.stringify(o);};
+  function resize(){try{fit.fit();}catch(e){}}
+  window.addEventListener('resize',resize);
+  function setSt(on,s){dot.classList.toggle('on',on);txt.textContent=s;}
+  function connect(){
+    if(stopped)return;
+    setSt(false,'connecting\\u2026');
+    fetch('/api/term-token',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
+      .then(function(d){
+        if(!d||!d.token){setSt(false,'auth failed');setTimeout(connect,3000);return;}
+        var proto=location.protocol==='https:'?'wss:':'ws:';
+        ws=new WebSocket(proto+'//'+location.host+'/api/term?role=browser&t='+encodeURIComponent(d.token));
+        ws.binaryType='arraybuffer';
+        ws.onopen=function(){setSt(true,'connected');resize();
+          if(ws.readyState===1)ws.send(ctrl({c:term.cols,r:term.rows}));};
+        ws.onmessage=function(ev){term.write(typeof ev.data==='string'?ev.data:new Uint8Array(ev.data));};
+        ws.onclose=function(){setSt(false,'disconnected');if(!stopped)setTimeout(connect,2000);};
+        ws.onerror=function(){};
+      }).catch(function(){setSt(false,'offline');setTimeout(connect,3000);});
+  }
+  term.onData(function(d){if(ws&&ws.readyState===1)ws.send(d);});
+  term.onResize(function(s){if(ws&&ws.readyState===1)ws.send(ctrl({c:s.cols,r:s.rows}));});
+  connect();
+})();
+</script>
+</body></html>`;
+}
 
 function bearerOk(req: Request) {
   return !TOKEN || req.headers.get("authorization") === `Bearer ${TOKEN}`;
@@ -507,8 +606,54 @@ pruneOldEvents();
 Bun.serve({
   port: PORT,
   hostname: HOST,
-  async fetch(req) {
+  websocket: {
+    open(ws) {
+      if (ws.data.role === "agent") {
+        if (agentSocket && agentSocket !== ws) {
+          try { agentSocket.close(); } catch {}
+        }
+        agentSocket = ws;
+        console.log("[tracker-web] terminal agent connected");
+      } else {
+        browserSockets.add(ws);
+      }
+    },
+    message(ws, message) {
+      // Relay verbatim: agent output → all browsers; browser input/resize → agent.
+      if (ws.data.role === "agent") {
+        for (const b of browserSockets) { try { b.send(message); } catch {} }
+      } else if (agentSocket) {
+        try { agentSocket.send(message); } catch {}
+      }
+    },
+    close(ws) {
+      if (ws.data.role === "agent") {
+        if (agentSocket === ws) agentSocket = null;
+        console.log("[tracker-web] terminal agent disconnected");
+      } else {
+        browserSockets.delete(ws);
+      }
+    },
+  },
+  async fetch(req, server) {
     const url = new URL(req.url);
+
+    // Reverse-terminal WebSocket: the agent authenticates with the Bearer
+    // token, browsers with a short-lived token from the Basic-auth page.
+    if (url.pathname === "/api/term") {
+      if (!ENABLE_TERMINAL) return new Response("not found", { status: 404 });
+      const role = url.searchParams.get("role");
+      if (role === "agent") {
+        if (!bearerOk(req)) return new Response("unauthorized", { status: 401 });
+      } else if (role === "browser") {
+        if (!termTokenOk(url.searchParams.get("t"))) return new Response("unauthorized", { status: 401 });
+      } else {
+        return new Response("bad role", { status: 400 });
+      }
+      const data: TermData = { role: role as TermRole };
+      if (server.upgrade(req, { data })) return;
+      return new Response("upgrade failed", { status: 400 });
+    }
 
     // Machine API — Bearer token
     if (url.pathname === "/api/ingest" && req.method === "POST") {
@@ -608,6 +753,23 @@ Bun.serve({
 
     // Browser routes — Basic auth
     if (!basicOk(req)) return unauthorized();
+
+    if (url.pathname === "/terminal") {
+      if (!ENABLE_TERMINAL) return new Response("terminal disabled", { status: 404 });
+      return new Response(terminalPage(issueTermToken()), {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
+    }
+    if (url.pathname === "/api/term-token") {
+      if (!ENABLE_TERMINAL) return new Response("terminal disabled", { status: 404 });
+      return Response.json({ token: issueTermToken(), agent: agentSocket !== null });
+    }
+    if (url.pathname.startsWith("/terminal/") && !ENABLE_TERMINAL) {
+      return new Response("terminal disabled", { status: 404 });
+    }
+    if (url.pathname.startsWith("/terminal/")) {
+      return serveTermAsset(decodeURIComponent(url.pathname.slice("/terminal/".length)));
+    }
 
     // Event feed for the calendar/history auto-refresh.
     if (url.pathname === "/api/events") {

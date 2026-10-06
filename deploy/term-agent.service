@@ -1,0 +1,20 @@
+[Unit]
+Description=Reverse terminal agent (outbound WebSocket -> dashboard /terminal)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tracker
+Group=tracker
+WorkingDirectory=/opt/tracker
+EnvironmentFile=/etc/tracker/sync.env
+EnvironmentFile=-/etc/tracker/term.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/tracker/venv/bin/python /opt/tracker/term_agent.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
