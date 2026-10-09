@@ -131,6 +131,7 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_CAPTURE_PIPELINE` | – | GStreamer pipeline, e.g. Pi hardware `v4l2h264dec` |
 | `TRACKER_RTSP_RELAY` | `0` | Route capture through `RtspRelay` for SHA-256 Digest cameras |
 | `TRACKER_CAM2_URL` | – | Optional second camera substream shown raw on `/live` (no detection) |
+| `TRACKER_CAPTURE_URL` | derived | Full-res crossing still (ONVIF main-profile snapshot); substream fallback |
 
 The reverse terminal agent reads its own file, `/etc/tracker/term.env` (plus
 `TRACKER_TOKEN` from `sync.env`):
@@ -255,6 +256,12 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
   set it with `tools/set_camera_time.py`; prefer `--set-ntp pool.ntp.org` so it
   self-corrects. It uses ONVIF `Get/SetSystemDateAndTime` + `SetNTP` with
   WS-UsernameToken auth (pass the password via `TRACKER_CAM_PASSWORD`).
+- **Evidence captures come from the main stream.** Counting runs on the 640×360
+  substream, but at each crossing `run.py` fetches a full-resolution still from
+  the camera's main-profile ONVIF snapshot (`/onvif-http/snapshot?Profile_1`,
+  camera-side JPEG, SHA-256 Digest) — no extra Pi video decode. It falls back to
+  the processed substream frame if the fetch fails. URL/creds default to the
+  stream URL's (`TRACKER_CAPTURE_URL`/`_USER`/`_PASSWORD` to override).
 
 ## License
 

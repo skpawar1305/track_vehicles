@@ -2,6 +2,7 @@ import json, threading, time, os, sys
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Queue, Empty, Full
+from urllib.parse import urlsplit, unquote
 
 
 def _enable_relay_capture_opts():
@@ -119,6 +120,14 @@ class Config:
         if not self.live2_url and _live:
             self.live2_url = _live.replace("/api/live", "/api/live2")
         self.live2_wanted = False
+        # Full-resolution evidence: at each crossing fetch a still from the
+        # camera's main-profile ONVIF snapshot (the camera encodes the JPEG, so
+        # no Pi decode). Falls back to the processed substream frame if the fetch
+        # fails. URL/user/password default to the stream URL's; override with
+        # TRACKER_CAPTURE_URL / _USER / _PASSWORD.
+        self.capture_url = os.environ.get("TRACKER_CAPTURE_URL", "")
+        self.capture_user = os.environ.get("TRACKER_CAPTURE_USER", "")
+        self.capture_password = os.environ.get("TRACKER_CAPTURE_PASSWORD", "")
         self._load()
 
     def _load(self):
@@ -140,8 +149,25 @@ class Config:
                     data.get("enabled_classes", DEFAULT_ENABLED_CLASSES))
                 self.relay = bool(data.get("relay", self.relay))
                 self.cam2_url = data.get("cam2_url", self.cam2_url)
+                self.capture_url = data.get("capture_url", self.capture_url)
+            self._derive_capture()
         except (FileNotFoundError, json.JSONDecodeError):
             pass
+
+    def _derive_capture(self):
+        """Default the full-res capture URL/creds from the RTSP stream URL."""
+        if not self.stream_url.startswith("rtsp://"):
+            return
+        u = urlsplit(self.stream_url)
+        if not u.hostname:
+            return
+        if not self.capture_user:
+            self.capture_user = unquote(u.username or "")
+        if not self.capture_password:
+            self.capture_password = unquote(u.password or "")
+        if not self.capture_url:
+            # Prama/PT-NC cameras serve a hardware-encoded 1080p still here.
+            self.capture_url = f"https://{u.hostname}/onvif-http/snapshot?Profile_1"
 
     def save(self):
         with self.lock:
@@ -150,7 +176,7 @@ class Config:
                     "conf_thresh": self.conf_thresh, "flip_sides": self.flip_sides,
                     "capture_dir": self.capture_dir, "max_captures": self.max_captures,
                     "enabled_classes": self.enabled_classes, "relay": self.relay,
-                    "cam2_url": self.cam2_url}
+                    "cam2_url": self.cam2_url, "capture_url": self.capture_url}
         with open(CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
 
@@ -332,6 +358,25 @@ class CaptureManager:
         cv2.imwrite(os.path.join(self.capture_dir, "thumb", filename), thumb,
                     [cv2.IMWRITE_JPEG_QUALITY, self.THUMB_QUALITY])
 
+        return {"filename": filename, "thumb": f"thumb/{filename}", "timestamp": ts,
+                "track_id": track_id, "direction": direction_label}
+
+    def save_jpeg(self, data, track_id, direction):
+        """Persist an already-encoded JPEG (e.g. a camera main-stream still)."""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        direction_label = "in" if direction == 1 else "out"
+        filename = f"{ts}_id{track_id}_{direction_label}.jpg"
+        with open(os.path.join(self.capture_dir, filename), "wb") as f:
+            f.write(data)
+        # Thumbnail needs pixels; decode once (events are sparse).
+        frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        if frame is not None:
+            h, w = frame.shape[:2]
+            tw = min(self.THUMB_WIDTH, w)
+            th = max(1, int(h * tw / w))
+            thumb = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
+            cv2.imwrite(os.path.join(self.capture_dir, "thumb", filename), thumb,
+                        [cv2.IMWRITE_JPEG_QUALITY, self.THUMB_QUALITY])
         return {"filename": filename, "thumb": f"thumb/{filename}", "timestamp": ts,
                 "track_id": track_id, "direction": direction_label}
 
@@ -1237,6 +1282,63 @@ def cam2_loop(cfg, live2_q, stop):
         relay.stop()
     print("[cam2] Done")
 
+def fetch_capture_jpeg(cfg, timeout=6.0):
+    """GET one full-resolution still from the camera's main profile.
+
+    The camera hardware-encodes the JPEG, so this costs the Pi one HTTP GET and
+    no video decode. Returns bytes, or None on any failure.
+    """
+    import requests
+    from requests.auth import HTTPDigestAuth
+    if not cfg.capture_url:
+        return None
+    try:
+        r = requests.get(cfg.capture_url,
+                         auth=HTTPDigestAuth(cfg.capture_user, cfg.capture_password),
+                         verify=False, timeout=timeout)
+        if r.ok and r.content and r.headers.get("content-type", "").startswith("image/"):
+            return r.content
+    except Exception:
+        pass
+    return None
+
+
+def capture_loop(cfg, capture_mgr, store, capture_q):
+    """Persist crossings on a worker thread (fetch/save off the track loop).
+
+    Prefers a full-resolution main-stream still; falls back to the processed
+    substream frame when the snapshot is unavailable.
+    """
+    while cfg.running:
+        try:
+            item = capture_q.get(timeout=1.0)
+        except Empty:
+            continue
+        entry = None
+        jpeg = fetch_capture_jpeg(cfg)
+        if jpeg is not None:
+            entry = capture_mgr.save_jpeg(jpeg, item["track_id"], item["direction"])
+            print(f"[capture] ID#{item['track_id']} main-stream ({len(jpeg) // 1024}KB)")
+        if entry is None:
+            entry = capture_mgr.save(item["frame"], item["track_id"],
+                                     item["direction"], item["bbox"])
+            print(f"[capture] ID#{item['track_id']} substream fallback")
+        cfg.add_capture(entry)
+        store.add({
+            "id": entry["filename"].rsplit(".", 1)[0],
+            "track_id": item["track_id"],
+            "class_id": item["class_id"],
+            "label": item["label"],
+            "confidence": item["confidence"],
+            "direction": entry["direction"],
+            "crossed_at": item["crossed_at"],
+            "bbox": item["bbox"],
+            "line": item["line"],
+            "image_path": entry["filename"],
+            "thumb_path": entry["thumb"],
+        })
+
+
 def config_loop(cfg):
     """Polls the server for line/scan-area config and applies changes."""
     import requests
@@ -1320,6 +1422,13 @@ def main():
     threading.Thread(target=detect_loop,
                      args=(detector, cfg, latest, shared, stop), daemon=True).start()
     print("[main] Reader + detect threads started")
+
+    # Full-res evidence: a worker fetches the camera's main-stream still at each
+    # crossing (substream fallback) so a network fetch never stalls tracking.
+    capture_q = Queue(maxsize=64)
+    threading.Thread(target=capture_loop, args=(cfg, capture_mgr, store, capture_q),
+                     daemon=True).start()
+    print("[main] Capture worker started")
 
     # Live relay to the VPS dashboard (optional; outbound POST)
     live_url   = os.environ.get("TRACKER_LIVE_URL", "")
@@ -1451,22 +1560,18 @@ def main():
                     continue
                 last_cross_info[obj.track_id] = {'frame': total_frames, 'dir': crossing}
                 direction = 'IN' if crossing == CROSSING_IN else 'OUT'
-                # Save the RAW frame (no overlay) — usable as YOLO training data
-                entry = capture_mgr.save(frame, obj.track_id, crossing, obj.bbox)
-                cfg.add_capture(entry)
-                store.add({
-                    "id": entry["filename"].rsplit(".", 1)[0],
-                    "track_id": obj.track_id,
-                    "class_id": obj.class_id,
-                    "label": obj.label,
-                    "confidence": obj.confidence,
-                    "direction": entry["direction"],
-                    "crossed_at": datetime.now(timezone.utc).isoformat(),
-                    "bbox": list(obj.bbox),
-                    "line": line_px,
-                    "image_path": entry["filename"],
-                    "thumb_path": entry["thumb"],
-                })
+                # Hand the capture to a worker: it fetches a full-res main-stream
+                # still (substream fallback) without stalling the track loop.
+                try:
+                    capture_q.put_nowait({
+                        "track_id": obj.track_id, "class_id": obj.class_id,
+                        "label": obj.label, "confidence": obj.confidence,
+                        "direction": crossing, "bbox": list(obj.bbox),
+                        "line": line_px, "frame": frame.copy(),
+                        "crossed_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                except Full:
+                    pass
                 if crossing == CROSSING_IN:
                     c_in += 1
                 else:

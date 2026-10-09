@@ -39,6 +39,11 @@
   5h30m behind — local time mistaken for UTC). `tools/set_camera_time.py` reads/sets it over
   ONVIF (`SetSystemDateAndTime` + `SetNTP`, WS-UsernameToken; password via
   `TRACKER_CAM_PASSWORD`). Keep it on NTP so it self-corrects.
+- **Evidence captures use the main stream, counting uses the substream.** At each
+  crossing a worker thread fetches a full-res still from the camera's ONVIF
+  snapshot (`/onvif-http/snapshot?Profile_1`, camera-side JPEG, SHA-256 Digest) —
+  so no extra Pi decode — and falls back to the substream frame if the fetch
+  fails. Keep the fetch off the main loop (a network call would stall tracking).
 - **A second camera can be shown raw (no detection) with no idle cost.**
   `TRACKER_CAM2_URL` (substream) + `CAM2=1` on the VPS render a second `/live`
   panel (`/api/live2`, `/live2.jpg`). The Pi opens the RTSP/relay session only while
