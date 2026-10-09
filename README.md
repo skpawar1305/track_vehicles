@@ -1,8 +1,9 @@
 # Vehicle Line Counter
 
 RTSP vehicle counting with line-crossing detection. Inference is **YOLO26n INT8** via
-**ncnn** (ARM-optimised), tracking is a **velocity-predicted IoU tracker**, the edge store
-is **offline-first SQLite**, and the dashboard is **Bun + Drizzle + SQLite** on a VPS.
+**ncnn** (ARM-optimised), tracking is a **two-tier velocity tracker** (IoU primary,
+centroid-distance fallback), the edge store is **offline-first SQLite**, and the dashboard
+is **Bun + Drizzle + SQLite** on a VPS.
 
 ```
 ┌──────────────── Pi 5 (DietPi, behind NAT) ─────────────────────────┐
@@ -46,11 +47,13 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
   fresh detections the tracker is fed an empty set and **coasts** the tracks forward
   (constant velocity), so the crossing test samples at frame rate (YOLO is ~27 ms/frame
   ≈ 37 fps on the Pi 5, so detection keeps up).
-- **IoU tracking on predicted boxes.** Detections are matched to tracks by IoU
+- **Two-tier association.** Detections are matched to tracks in two tiers: (1) **IoU**
   (`TRACKER_IOU_GATE`) against each track's *velocity-predicted* box — the last box
-  translated by its px/second velocity over the elapsed time. Frame-to-frame at ~25 fps
-  the shift is negligible (a standard IoU tracker); across a multi-second stream stall the
-  box is extrapolated forward so a genuine constant-velocity detection still overlaps.
+  translated by its px/second velocity over the elapsed time, so frame-to-frame at ~25 fps
+  this is a standard IoU tracker; (2) a **centroid-distance fallback** whose gate widens
+  with the gap (`TRACKER_ASSOC_FRAC`, `TRACKER_ASSOC_GAP_FRAC`, capped by
+  `TRACKER_ASSOC_MAX_FRAC`), so a track re-acquires a vehicle that moved far during a
+  multi-second stall even if the predicted box missed. IoU always wins over the fallback.
   No appearance model; suits sparse traffic, not dense crowds.
 - **Crossing test (hysteresis).** Each track commits to a side of the line; a crossing
   counts only when the centroid emerges ≥ `TRACKER_CROSS_MARGIN_FRAC` of the frame height
@@ -127,6 +130,9 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_MIN_TRACK_AGE` / `_MIN_TRAVEL_FRAC` | `1` / `0.02` | Crossing gate |
 | `TRACKER_CROSS_MARGIN_FRAC` | `0.015` | Hysteresis past the line (fraction of frame height) |
 | `TRACKER_IOU_GATE` | `0.2` | Min IoU with the velocity-predicted box to match a detection |
+| `TRACKER_ASSOC_FRAC` | `0.2` | Fallback centroid gate = fraction of frame width |
+| `TRACKER_ASSOC_GAP_FRAC` | `0.5` | Extra fallback gate per second of stream gap |
+| `TRACKER_ASSOC_MAX_FRAC` | `1.0` | Cap on the fallback gate (fraction of frame diagonal) |
 | `TRACKER_TRACK_MAX_AGE` | `25` | Frames a track coasts with no detection before dropping |
 | `TRACKER_ASSOC_PRED_CAP` | `0.5` | Cap (s) on the coasted-centroid extrapolation used for display |
 | `TRACKER_RETENTION_DAYS` | `30` | Local capture/event retention |
@@ -312,8 +318,8 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
   class-agnostic NMS (`TRACKER_DUP_IOU`, default 0.6) merges them at the detector
   (the Ultralytics `agnostic_nms` equivalent), and a crossing-level de-dupe
   (`TRACKER_CROSS_DEDUP_S`, default 1 s) guarantees one event. Counting uses a
-  velocity-predicted IoU tracker (`TRACKER_IOU_GATE`, default 0.2): no custom
-  distance metric, and the predicted box keeps the vehicle matchable across a
+  two-tier tracker — IoU on the velocity-predicted box (`TRACKER_IOU_GATE`), with a
+  gap-widened centroid-distance fallback — so the vehicle stays matchable across a
   multi-second stall.
 - **Offline-first, and unsynced rows are never pruned.** Events and images queue
   locally until `sync.py` gets a 2xx from the VPS, which is the only point a local

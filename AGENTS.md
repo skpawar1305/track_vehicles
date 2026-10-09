@@ -110,13 +110,16 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   To tell a *duplicated* frame from a *static* one, use the container timestamp
   (`CAP_PROP_POS_MSEC`), not pixel diffs; the reader's `fresh` flag is for the stall case
   below, not normal operation.
-- **IoU association, but on a velocity-predicted box.** Frame-to-frame at ~25 fps a plain
-  IoU tracker works. Use the track's last box *translated by px/second velocity over the
-  elapsed time* (`_pred_box`), not the raw last box: across a multi-second stall the raw
-  box has 0 IoU with the moved vehicle, while the extrapolated one still overlaps. There is
-  no distance/centroid association fallback — if the predicted IoU is below
-  `TRACKER_IOU_GATE` (0.2, == ByteTrack's `match_thresh` 0.8) the track simply coasts.
-  Association is greedy (best IoU first); `bytetracker` is not used (only the dev harnesses).
+- **Two-tier association: IoU primary, centroid-distance fallback.** Frame-to-frame at
+  ~25 fps a plain IoU tracker works, so tier 1 matches by IoU against the track's last box
+  *translated by px/second velocity over the elapsed time* (`_pred_box`) — the raw last box
+  has 0 IoU with a vehicle that moved during a stall, the extrapolated one often still
+  overlaps. `TRACKER_IOU_GATE` (0.2, == ByteTrack's `match_thresh` 0.8) is the minimum.
+  Tier 2 (fallback) is a centroid-distance gate that widens with the gap
+  (`TRACKER_ASSOC_FRAC` + `TRACKER_ASSOC_GAP_FRAC`, capped by `TRACKER_ASSOC_MAX_FRAC`): a
+  tracked vehicle whose box changed shape/speed so IoU misses is still re-acquired by
+  proximity. Sort key is `(tier, cost)`, so every IoU match beats any fallback and the best
+  per-tier match is chosen (greedy; `bytetracker` is not used — only the dev harnesses).
 - **Crossing needs hysteresis, not a bare side-change.** A low-confidence box near
   the line jitters across it and registers false IN/OUT. `CrossingGate.crossing` commits each
   track to a side and requires the centroid to emerge >= `TRACKER_CROSS_MARGIN_FRAC` of the
@@ -130,7 +133,7 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   last box.
 - **Cap the coasted display position; ignore repeated frames.** The centroid used for the
   live overlay is extrapolated by at most `TRACKER_ASSOC_PRED_CAP` (0.5 s) so it can't fly
-  off-frame (association itself uses the full gap, since a wrong prediction only costs an
+  off-frame (the IoU box prediction uses the full gap, since a wrong prediction only costs an
   IoU miss). If the camera repeats its last frame while stalled, feeding that identical image
   while wall-clock advances would collapse velocity to zero; the reader flags it `fresh=False`,
   the tracker is not advanced on it (the live relay still is, so the dashboard doesn't

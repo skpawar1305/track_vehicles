@@ -60,6 +60,7 @@ def main():
     ap.add_argument("--min-travel-frac", type=float, default=0.02)
     ap.add_argument("--cross-margin-frac", type=float, default=0.015)
     ap.add_argument("--iou-gate", type=float, default=0.2)
+    ap.add_argument("--assoc-frac", type=float, default=0.2)
     ap.add_argument("--out", default="")
     ap.add_argument("--realtime", action="store_true", help="pace playback to video fps")
     ap.add_argument("--live-url", default="", help="VPS /api/live to push annotated frames")
@@ -69,7 +70,7 @@ def main():
 
     classes = [int(c) for c in args.classes.split(",") if c != ""]
     det = YoloNcnn(conf_thresh=args.conf)
-    tracker = CentroidTracker(iou_gate=args.iou_gate)
+    tracker = CentroidTracker(iou_gate=args.iou_gate, assoc_frac=args.assoc_frac)
     gate = CrossingGate(min_age=args.min_age, min_travel_frac=args.min_travel_frac)
 
     cap = cv2.VideoCapture(args.file, cv2.CAP_FFMPEG)
