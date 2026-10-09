@@ -19,7 +19,7 @@ RTSP vehicle counting with line-crossing detection. Inference is **YOLO26n INT8*
 │ POST /api/ingest (bearer)  → images + events                      │
 │ POST /api/live   (bearer)  → live frame relay                     │
 │ WS   /api/term   (bearer)  → reverse terminal relay (browser↔Pi)  │
-│ GET  /                     → live + calendar/history + setup + term│
+│ GET  /                     → live + timeline + setup + term       │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -164,13 +164,12 @@ Pages (each its own URL; `/` redirects to `/live`):
 | Route | Contents |
 |-------|----------|
 | `/live` | MJPEG/snapshot live view + setup editor |
-| `/calendar` | Month grid of per-day IN/OUT; tap a day to reveal its captures inline |
-| `/history` | Capture list, optionally filtered by `?day=YYYY-MM-DD` |
+| `/timeline` | Capture timeline: a horizontally scrollable strip of day squares (date + IN/OUT counts), oldest→newest with today auto-scrolled into view; `←`/`→` step a day, never into the future; days with no captures are still shown; the selected day's captures load on demand (deep-link `?day=YYYY-MM-DD` or `?d=`; old `/calendar` links redirect here) |
 | `/terminal` | Reverse web shell into the Pi (xterm.js); opt-in via `ENABLE_TERMINAL=1` |
 
 - **Timezone:** timestamps are stored in UTC but displayed and day-bucketed in **IST**
   (UTC+5:30), so calendar days and "today" totals line up with local midnight.
-- **Browser auth:** dashboard routes (`/live`, `/calendar`, `/history`, `/img/*`,
+- **Browser auth:** dashboard routes (`/live`, `/timeline`, `/img/*`,
   `/thumb/*`, `/live.jpg`) use HTTP Basic.
 - **Machine auth:** `/api/ingest`, `/api/live`, and `GET /api/config` accept the `TRACKER_TOKEN` bearer.
 - **Live feed:** the Pi POSTs annotated frames to `/api/live` only while a viewer is present
@@ -178,8 +177,10 @@ Pages (each its own URL; `/` redirects to `/live`):
   A second camera can be shown raw alongside: with `CAM2=1` the Pi POSTs its substream to
   `/api/live2` (no detection) and the page polls `/live2.jpg` — again only while watched, so
   an idle edge streams nothing.
-- **Auto-refresh:** the calendar and history views poll `GET /api/events` every 8 s and
-  re-render only when the event count changes; the header counts refresh from `GET /api/config`.
+- **Timeline data:** the initial page ships only per-day IN/OUT counts (`GET /api/events`,
+  polled every 8 s); a day's captures are fetched on demand from `GET /api/day?d=YYYY-MM-DD`
+  and cached client-side, so first paint stays tiny and switching days is instant.
+  The header counts refresh from `GET /api/config`.
 
 ### Web terminal (`/terminal`)
 

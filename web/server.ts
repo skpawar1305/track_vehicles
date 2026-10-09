@@ -244,31 +244,36 @@ type EventRow = {
   track_id: number | null; crossed_at: string | null; created_at: string;
 };
 
-// Shared by the initial page render and GET /api/events so the calendar/history
-// views can auto-refresh without a reload.
-function loadEventData() {
-  const dayExpr = istDay("COALESCE(crossed_at, created_at)");
-  const counts = sqlite
-    .query("SELECT direction, COUNT(*) AS c FROM events GROUP BY direction")
-    .all() as { direction: string; c: number }[];
-  const cIn = counts.find((r) => r.direction === "in")?.c ?? 0;
-  const cOut = counts.find((r) => r.direction === "out")?.c ?? 0;
+type DayEvent = { id: string; label: string; dir: string; track: number | null; ts: string };
 
+// Day-bucketed IN/OUT counts, shared by the initial page render and
+// GET /api/events so the timeline can auto-refresh without a reload.
+function loadDayStats() {
+  const dayExpr = istDay("COALESCE(crossed_at, created_at)");
   const days = sqlite
     .query(`SELECT ${dayExpr} AS d, SUM(direction='in') AS inn, SUM(direction='out') AS outt
             FROM events GROUP BY d`)
     .all() as { d: string; inn: number; outt: number }[];
-  const dayStats = Object.fromEntries(days.map((d) => [d.d, { in: d.inn ?? 0, out: d.outt ?? 0 }]));
+  return Object.fromEntries(days.map((d) => [d.d, { in: d.inn ?? 0, out: d.outt ?? 0 }]));
+}
 
+// All captures for one IST day, fetched on demand. Keeping this off the initial
+// page makes first paint tiny and day switching snappy even after months of data.
+function loadDay(day: string) {
   const rows = sqlite
     .query(`SELECT id,label,direction,track_id,crossed_at,created_at FROM events
-            ORDER BY created_at DESC LIMIT 500`)
-    .all() as EventRow[];
-  const events = rows.map((r) => ({
+            WHERE ${istDay("COALESCE(crossed_at, created_at)")} = ?
+            ORDER BY COALESCE(crossed_at, created_at) DESC LIMIT 1000`)
+    .all(day) as EventRow[];
+  const events: DayEvent[] = rows.map((r) => ({
     id: r.id, label: r.label ?? "", dir: r.direction ?? "", track: r.track_id,
     ts: r.crossed_at || r.created_at || "",
   }));
-  return { cIn, cOut, dayStats, events };
+  const counts = {
+    in: events.filter((e) => e.dir.toLowerCase() === "in").length,
+    out: events.filter((e) => e.dir.toLowerCase() === "out").length,
+  };
+  return { day, counts, events };
 }
 
 function istTodayCounts() {
@@ -282,8 +287,8 @@ function istTodayCounts() {
   };
 }
 
-function dashboard(view: "live" | "calendar" | "history", initialDay: string | null) {
-  const { cIn, cOut, dayStats, events } = loadEventData();
+function dashboard(view: "live" | "timeline", initialDay: string | null) {
+  const dayStats = loadDayStats();
   const init = initialDay && /^\d{4}-\d{2}-\d{2}$/.test(initialDay) ? initialDay : null;
   const J = (o: unknown) => JSON.stringify(o).replace(/</g, "\\u003c");
   const cam2Panel = CAM2
@@ -333,34 +338,24 @@ main{max-width:920px;margin:0 auto;padding:14px}
 .feedtag{position:absolute;left:10px;top:10px;z-index:2;font-size:11px;font-weight:700;color:#fff;background:rgba(15,23,42,.6);backdrop-filter:blur(4px);padding:5px 10px;border-radius:999px;display:flex;align-items:center;gap:6px;pointer-events:none}
 .feedtag .d{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(22,163,74,.25)}
 .sub{margin:12px 2px 0;color:var(--muted);font-size:12px;text-align:center}
-.calhead{display:flex;align-items:center;gap:8px;margin-bottom:12px}
-#calToggle{transition:transform .15s}
-#calToggle.collapsed{transform:rotate(-90deg)}
-#calTitle{font-weight:800;font-size:16px;min-width:132px;text-align:center}
-.pill{border:1px solid var(--line);background:#fff;border-radius:999px;padding:9px 16px;cursor:pointer;font-weight:600;font-size:13px;transition:background .15s}
-.pill:hover{background:#f8fafc}
-.calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
-.calgrid.off{display:none}
-.calgrid .dow{font-size:11px;font-weight:700;color:var(--muted);text-align:center;padding:2px 0;letter-spacing:.04em}
-.cell{min-height:58px;border:1px solid var(--line);border-radius:13px;background:var(--card);padding:6px 7px;display:flex;flex-direction:column;justify-content:space-between;cursor:pointer;transition:background .15s,box-shadow .15s;overflow:hidden}
-.cell:hover{box-shadow:var(--shadow)}
-.cell.empty{border:none;background:transparent;cursor:default;box-shadow:none}
-.cell.today{border-color:var(--blue);background:#eff6ff}
-.cell.sel{background:#dbeafe;border-color:var(--blue);box-shadow:0 0 0 2px rgba(37,99,235,.25)}
-.cell.future{opacity:.32;cursor:default}
-.cell .n{font-size:12px;font-weight:700;color:var(--muted)}
-.cell.today .n,.cell.sel .n{color:var(--blue)}
-.cell .c{display:flex;flex-direction:column;gap:2px;align-items:flex-start}
-.cell .badge{font-size:10px;font-weight:800;font-variant-numeric:tabular-nums;border-radius:6px;padding:0 5px;line-height:1.5;max-width:100%}
-.cell .ci{color:var(--green);background:rgba(22,163,74,.1)}
-.cell .co{color:var(--red);background:rgba(220,38,38,.1)}
+.daystrip{display:flex;gap:8px;overflow-x:auto;padding:2px 2px 10px;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}
+.daystrip::-webkit-scrollbar{height:6px}
+.daystrip::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:999px}
+.daycard{flex:0 0 auto;width:60px;border:1px solid var(--line);background:var(--card);border-radius:13px;padding:7px 5px;display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;scroll-snap-align:center;transition:background .12s,border-color .12s}
+.daycard:hover{background:#f8fafc}
+.daycard.sel{border-color:var(--blue);background:#eff6ff;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
+.daycard .dn{font-size:18px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums}
+.daycard .wd{font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.daycard.today .wd{color:var(--blue)}
+.daycard .cnt{display:flex;flex-direction:column;gap:2px;align-items:center;width:100%;margin-top:2px;min-height:16px}
+.daycard .b{font-size:10px;font-weight:800;border-radius:6px;padding:0 5px;line-height:1.5;font-variant-numeric:tabular-nums}
+.daycard .bi{color:var(--green);background:rgba(22,163,74,.1)}
+.daycard .bo{color:var(--red);background:rgba(220,38,38,.1)}
+.daycard .z{font-size:11px;color:#cbd5e1}
 .histhead{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
 .histhead .d{font-weight:800;font-size:16px}
 .histhead .c{font-size:12px;color:var(--muted)}
-.histhead .pill{margin-left:auto}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px}
-.daysep{display:flex;align-items:center;gap:10px;margin:16px 0 10px;color:var(--muted);font-size:12px;font-weight:700}
-.daysep:before,.daysep:after{content:"";height:1px;background:var(--line);flex:1}
 .grp{margin-top:6px}
 .seg{display:inline-flex;background:#eef2f7;border:1px solid var(--line);border-radius:999px;padding:3px;gap:3px;margin:2px 0 12px}
 .seg button{border:0;background:transparent;border-radius:999px;padding:7px 15px;font-size:13px;font-weight:700;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:7px}
@@ -410,14 +405,7 @@ img{max-width:100%}
   .stat{padding:10px 12px;border-radius:14px}
   .stat .num{font-size:26px}
   main{padding:12px 10px}
-  .calhead{gap:6px;margin-bottom:10px}
-  #calTitle{min-width:auto;font-size:15px;flex:1}
-  .pill{padding:8px 13px}
-  .calgrid{gap:4px}
-  .calgrid .dow{font-size:10px;padding:1px 0}
-  .cell{min-height:52px;padding:5px 5px;border-radius:11px}
-  .cell .n{font-size:11px}
-  .cell .badge{font-size:9px;padding:0 4px}
+  .daycard{width:56px}
   .gallery{grid-template-columns:repeat(auto-fill,minmax(138px,1fr));gap:9px}
   figcaption{padding:7px 8px}
   figcaption .t b{font-size:15px}
@@ -426,13 +414,13 @@ img{max-width:100%}
   .sheet{padding:calc(10px + env(safe-area-inset-top)) 10px calc(10px + env(safe-area-inset-bottom))}
   .tools button{padding:10px 13px}
 }
-@media(max-width:340px){.gallery{grid-template-columns:1fr 1fr}.cell .badge{font-size:8px}}
+@media(max-width:340px){.gallery{grid-template-columns:1fr 1fr}}
 </style></head><body>
 <header>
   <div class="bar">
     <div class="brand">
       <div class="logo"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="6" r="2.4"/><path d="M8.4 18H15a4 4 0 0 0 0-8H9a4 4 0 0 1 0-8h.6"/></svg></div>
-      <div><div class="title">Vehicle Tracker</div><div class="subt">${view === "live" ? "Live view" : view === "calendar" ? "Daily counts" : "Capture history"}</div></div>
+      <div><div class="title">Vehicle Tracker</div><div class="subt">${view === "live" ? "Live view" : "Capture timeline"}</div></div>
     </div>
     <div class="live"><span class="dot" id="dot"></span><span id="ltxt">…</span></div>
     <button class="icon" id="setupBtn" title="Setup">&#9881;</button>
@@ -451,28 +439,16 @@ img{max-width:100%}
     </div>
     <div class="sub">Tap the gear to edit the counting line / scan area</div>
   </section>
-  <section id="v-cal" class="view${view === "calendar" ? "" : " hidden"}">
-    <div class="calhead">
-      <button class="icon" id="calToggle" title="Show / hide calendar">&#9662;</button>
-      <button class="icon" id="prevMonth">&#8249;</button>
-      <div id="calTitle"></div>
-      <button class="icon" id="nextMonth">&#8250;</button>
-      <button class="pill" id="todayBtn">Today</button>
-    </div>
-    <div class="calgrid" id="calGrid"></div>
-    <div class="hint"><b style="color:var(--green)">IN</b> / <b style="color:var(--red)">OUT</b> per day &middot; &#8592; / &#8594; change day &middot; tap a day for captures</div>
-    <div class="histhead" id="calHistHead" style="margin-top:16px"></div>
+  <section id="v-timeline" class="view${view === "timeline" ? "" : " hidden"}">
+    <div class="daystrip" id="dayStrip"></div>
+    <div class="hint">Swipe for older days &middot; &#8592; / &#8594; step a day</div>
+    <div class="histhead" id="calHistHead" style="margin-top:14px"></div>
     <div id="calDay"></div>
-  </section>
-  <section id="v-hist" class="view${view === "history" ? "" : " hidden"}">
-    <div class="histhead" id="histHead"></div>
-    <div id="hist"></div>
   </section>
 </main>
 <nav class="tabbar">
   <a href="/live" class="tab${view === "live" ? " active" : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4V8z"/></svg><span>Live</span></a>
-  <a href="/calendar" class="tab${view === "calendar" ? " active" : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg><span>Calendar</span></a>
-  <a href="/history" class="tab${view === "history" ? " active" : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4L3 8"/><path d="M3 3v5h5"/><path d="M12 8v4l3 2"/></svg><span>History</span></a>
+  <a href="/timeline" class="tab${view === "timeline" ? " active" : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18"/><circle cx="7" cy="12" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="17" cy="12" r="2.2"/></svg><span>Timeline</span></a>
 </nav>
 <div class="sheet hidden" id="setup">
   <div class="sheetbar"><b>Camera setup</b><button class="icon" id="closeSetup">&#10005;</button></div>
@@ -492,10 +468,8 @@ img{max-width:100%}
 </div>
 <script>
 let DAYS=${J(dayStats)};
-let EVENTS=${J(events)};
 const INIT=${J(init)};
 const VIEW=${J(view)};
-let TOTALS={in:${cIn},out:${cOut}};
 </script>
 <script>
 (function(){
@@ -547,63 +521,58 @@ function setLive(on){if(on===liveOn)return;liveOn=on;
   else{if(pumpTimer){clearInterval(pumpTimer);pumpTimer=null;}
     live2On=false;if(pumpTimer2){clearInterval(pumpTimer2);pumpTimer2=null;}}}
 var views=[].slice.call(document.querySelectorAll('.view'));
-// Each view is its own route (/live, /calendar, /history); the nav links do a
-// normal navigation, so we only reveal the route's view and toggle the live pump.
+// Each view is its own route (/live, /timeline); the nav links do a normal
+// navigation, so we only reveal the route's view and toggle the live pump.
 function showTab(id){views.forEach(function(v){v.classList.toggle('hidden',v.id!==id);});
   setLive(id==='v-live');
   window.scrollTo(0,0);}
-showTab({live:'v-live',calendar:'v-cal',history:'v-hist'}[VIEW]||'v-live');
-var selDay=INIT;
+showTab({live:'v-live',timeline:'v-timeline'}[VIEW]||'v-live');
+var selDay=INIT||todayKey();   // today is open by default
 var dirFilter='in';
-var calOpen=true;
-var view=INIT?new Date(INIT+'T00:00:00'):new Date();
+var dayCache={};
 function pad(n){return String(n).padStart(2,'0');}
 function ymd(y,m,d){return y+'-'+pad(m+1)+'-'+pad(d);}
-var calGrid=document.getElementById('calGrid'),calTitle=document.getElementById('calTitle');
+var dayStrip=document.getElementById('dayStrip');
 // All day keys on the dashboard are IST (UTC+5:30), matching the server.
 function todayKey(){return new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Kolkata'});}
-function atOrAfterCurrentMonth(){var n=new Date();return view.getFullYear()>n.getFullYear()||
-  (view.getFullYear()===n.getFullYear()&&view.getMonth()>=n.getMonth());}
-function renderCal(){
-  var y=view.getFullYear(),m=view.getMonth();
-  calTitle.textContent=(!calOpen&&selDay)?dayLabel(selDay):view.toLocaleString(undefined,{month:'long',year:'numeric'});
-  var today=todayKey();
-  var h='';['Mo','Tu','We','Th','Fr','Sa','Su'].forEach(function(d){h+='<div class="dow">'+d+'</div>';});
-  var start=(new Date(y,m,1).getDay()+6)%7,dim=new Date(y,m+1,0).getDate();
-  for(var i=0;i<start;i++)h+='<div class="cell empty"></div>';
-  for(var d=1;d<=dim;d++){var k=ymd(y,m,d),c=DAYS[k]||{},future=k>today;
-    var cls='cell'+(future?' future':'')+(k===today?' today':'')+(k===selDay?' sel':'');
-    var din=c['in']||0,dout=c.out||0;
-    var badges=(din?'<b class="badge ci">'+din+'</b>':'')+(dout?'<b class="badge co">'+dout+'</b>':'');
-    h+='<div class="'+cls+'"'+(future?'':' data-day="'+k+'"')+'><span class="n">'+d+'</span><span class="c">'+badges+'</span></div>';}
-  calGrid.innerHTML=h;
-  [].slice.call(calGrid.querySelectorAll('[data-day]')).forEach(function(el){
-    // Stay on /calendar: reveal the day's captures inline instead of jumping to /history.
-    el.onclick=function(){selectDay(el.dataset.day);};});
-  document.getElementById('nextMonth').disabled=atOrAfterCurrentMonth();
-  calGrid.classList.toggle('off',!calOpen);
-  document.getElementById('prevMonth').style.visibility=calOpen?'visible':'hidden';
-  document.getElementById('nextMonth').style.visibility=calOpen?'visible':'hidden';
-  document.getElementById('calToggle').classList.toggle('collapsed',!calOpen);
+// Day squares: the last 30 days (the retention window) plus any day that has
+// data, so days with zero captures are still shown — just without badges.
+function dayKeys(){
+  var set={},today=todayKey(),b=new Date(today+'T00:00:00');
+  for(var i=0;i<30;i++){var d=new Date(b.getTime()-i*86400000);set[ymd(d.getFullYear(),d.getMonth(),d.getDate())]=1;}
+  Object.keys(DAYS).forEach(function(k){if(k<=today)set[k]=1;});
+  if(selDay)set[selDay]=1;
+  return Object.keys(set).sort();
 }
-function selectDay(k){selDay=k;if(k)view=new Date(k+'T00:00:00');calOpen=!k;renderCal();renderHist();renderCalDay();}
-function shiftDay(n){var b=selDay?new Date(selDay+'T00:00:00'):new Date();b.setDate(b.getDate()+n);
+function renderStrip(){
+  var keys=dayKeys(),today=todayKey();
+  dayStrip.innerHTML=keys.map(function(k){
+    var c=DAYS[k]||{in:0,out:0},d=new Date(k+'T00:00:00');
+    var wd=(d.getDate()===1)?d.toLocaleDateString('en-IN',{month:'short'}):d.toLocaleDateString('en-IN',{weekday:'short'});
+    var cnt=(c['in']||c.out)?'<span class="b bi">'+c['in']+'</span><span class="b bo">'+c.out+'</span>':'<span class="z">&middot;</span>';
+    return '<button class="daycard'+(k===selDay?' sel':'')+(k===today?' today':'')+'" data-d="'+k+'">'+
+      '<span class="dn">'+d.getDate()+'</span><span class="wd">'+wd+'</span>'+
+      '<span class="cnt">'+cnt+'</span></button>';
+  }).join('');
+  [].slice.call(dayStrip.querySelectorAll('[data-d]')).forEach(function(b){
+    b.onclick=function(){selectDay(b.dataset.d);};});
+  var sel=dayStrip.querySelector('.daycard.sel');
+  if(sel&&sel.scrollIntoView)sel.scrollIntoView({block:'nearest',inline:'center'});
+}
+function selectDay(k){selDay=k;renderStrip();renderCalDay();}
+// Move one day at a time; never past today.
+function shiftDay(n){var b=new Date((selDay||todayKey())+'T00:00:00');b.setDate(b.getDate()+n);
   var k=ymd(b.getFullYear(),b.getMonth(),b.getDate());if(k>todayKey())return;
   selectDay(k);}
-document.getElementById('prevMonth').onclick=function(){view.setMonth(view.getMonth()-1);renderCal();};
-document.getElementById('nextMonth').onclick=function(){if(atOrAfterCurrentMonth())return;view.setMonth(view.getMonth()+1);renderCal();};
-document.getElementById('todayBtn').onclick=function(){selectDay(todayKey());};
-document.getElementById('calToggle').onclick=function(){calOpen=!calOpen;renderCal();};
 document.addEventListener('keydown',function(e){if(e.target&&/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;
   if(e.key==='ArrowLeft'){shiftDay(-1);e.preventDefault();}else if(e.key==='ArrowRight'){shiftDay(1);e.preventDefault();}});
-var hist=document.getElementById('hist'),histHead=document.getElementById('histHead');
 var calDay=document.getElementById('calDay'),calHistHead=document.getElementById('calHistHead');
 function istDay(ts){try{return new Date(ts).toLocaleDateString('sv-SE',{timeZone:'Asia/Kolkata'});}catch(e){return (ts||'').slice(0,10);}}
 function fmt(ts){try{return new Date(ts).toLocaleString('sv-SE',{timeZone:'Asia/Kolkata'});}catch(e){return (ts||'').replace('T',' ').slice(0,19);}}
 // Hours dominate, minutes are secondary, seconds are dropped.
 function fmtTime(ts){var s=fmt(ts).slice(11,16);if(s.length<5)return '<b>'+s+'</b>';
   return '<b>'+s.slice(0,2)+'</b><span class="mm">'+s.slice(3,5)+'</span>';}
-// Human day label for the date separators / collapsed calendar.
+// Human day label for the timeline / day headers.
 function dayLabel(k){
   if(k===todayKey())return 'Today';
   var y=new Date(Date.now()-86400000).toLocaleDateString('sv-SE',{timeZone:'Asia/Kolkata'});
@@ -611,14 +580,10 @@ function dayLabel(k){
   try{return new Date(k+'T00:00:00').toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short',year:'numeric'});}
   catch(e){return k;}
 }
-// Render a capture list into any (head, grid) pair. A day filters to one IST day.
-function renderList(day, headEl, gridEl){
-  var list=day?EVENTS.filter(function(e){return istDay(e.ts)===day;}):EVENTS;
-  var c=day?(DAYS[day]||{in:0,out:0}):{in:TOTALS.in,out:TOTALS.out};
-  var ctrls=day?'<button class="pill clearBtn" style="margin-left:auto">All</button>':'';
-  headEl.innerHTML='<span class="d">'+(day?day:'All recent')+'</span>'+
-    '<span class="c"><b style="color:var(--green)">'+c['in']+' IN</b> &middot; <b style="color:var(--red)">'+c.out+' OUT</b></span>'+ctrls;
-  if(day){var clr=headEl.querySelector('.clearBtn');if(clr)clr.onclick=function(){selectDay(null);};}
+// Render one day's captures (IN/OUT tabs) into the timeline's list area.
+function renderList(day, list, counts, headEl, gridEl){
+  headEl.innerHTML='<span class="d">'+dayLabel(day)+'</span>'+
+    '<span class="c"><b style="color:var(--green)">'+counts['in']+' IN</b> &middot; <b style="color:var(--red)">'+counts.out+' OUT</b></span>';
   function card(e){
     return '<figure><a href="/img/'+encodeURIComponent(e.id)+'" target="_blank">'+
       '<img loading="lazy" src="/thumb/'+encodeURIComponent(e.id)+'" alt=""></a>'+
@@ -627,13 +592,13 @@ function renderList(day, headEl, gridEl){
   }
   var ins=list.filter(function(e){return e.dir.toLowerCase()==='in';});
   var outs=list.filter(function(e){return e.dir.toLowerCase()==='out';});
-  // IN / OUT as tabs so a long day's captures aren't one enormous page.
+  // IN / OUT as tabs so a busy day's captures aren't one enormous page.
   if(dirFilter!=='out')dirFilter='in';
   var seg=document.createElement('div');seg.className='seg';
   [['in','IN',ins.length],['out','OUT',outs.length]].forEach(function(t){
     var b=document.createElement('button');b.className=t[0]+(dirFilter===t[0]?' on':'');
     b.innerHTML=t[1]+' <span class="n">'+t[2]+'</span>';
-    b.onclick=function(){dirFilter=t[0];renderList(day,headEl,gridEl);};
+    b.onclick=function(){dirFilter=t[0];renderList(day,list,counts,headEl,gridEl);};
     seg.appendChild(b);
   });
   var items=dirFilter==='out'?outs:ins;
@@ -642,41 +607,38 @@ function renderList(day, headEl, gridEl){
   if(!items.length){
     var em=document.createElement('div');em.className='empty2';
     em.textContent='No '+dirFilter.toUpperCase()+' captures';wrap.appendChild(em);
-  } else if(day){
+  } else {
     var g=document.createElement('div');g.className='gallery';
     g.innerHTML=items.map(card).join('');wrap.appendChild(g);
-  } else {
-    // All recent: group by IST day, newest first (WhatsApp / Google-Photos style).
-    var byDay={},order=[];
-    items.forEach(function(e){var k=istDay(e.ts);if(!byDay[k]){byDay[k]=[];order.push(k);}byDay[k].push(e);});
-    order.forEach(function(k){
-      var sep=document.createElement('div');sep.className='daysep';
-      var lab=document.createElement('span');lab.textContent=dayLabel(k);sep.appendChild(lab);wrap.appendChild(sep);
-      var g=document.createElement('div');g.className='gallery';g.innerHTML=byDay[k].map(card).join('');wrap.appendChild(g);
-    });
   }
   gridEl.appendChild(wrap);
 }
-function renderHist(){renderList(selDay,histHead,hist);}
+// Day captures are fetched on demand and cached, so switching between days is
+// instant and we never ship the whole event table to the browser.
 function renderCalDay(){
-  if(!selDay){calHistHead.innerHTML='';calDay.innerHTML='';return;}
-  renderList(selDay,calHistHead,calDay);
+  var k=selDay||todayKey();
+  var cached=dayCache[k];
+  if(cached){renderList(k,cached.events,cached.counts,calHistHead,calDay);return;}
+  calHistHead.innerHTML='';calDay.innerHTML='<div class="empty2">Loading&hellip;</div>';
+  fetch('/api/day?d='+encodeURIComponent(k),{cache:'no-store'})
+    .then(function(r){return r.ok?r.json():null;})
+    .then(function(d){if(!d){calDay.innerHTML='<div class="empty2">Could not load</div>';return;}
+      dayCache[k]=d;if((selDay||todayKey())===k)renderList(k,d.events,d.counts,calHistHead,calDay);})
+    .catch(function(){calDay.innerHTML='<div class="empty2">Could not load</div>';});
 }
-renderCal();renderHist();renderCalDay();
-// Calendar/History auto-refresh: poll the event feed and re-render only when
-// something actually changed (so images/scroll don't flicker). The live view
-// doesn't need it.
+renderStrip();renderCalDay();
+// Timeline auto-refresh: poll the day counts and re-render only when something
+// actually changed (so images/scroll don't flicker). The live view doesn't need it.
 if(VIEW!=='live'){
-  var lastTotal=EVENTS.length;
+  var lastDays=JSON.stringify(DAYS);
   function refreshData(){
     fetch('/api/events',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
       .then(function(d){if(!d)return;
-        if(d.events)EVENTS=d.events;
-        if(d.days)DAYS=d.days;
-        if(d.counts)TOTALS=d.counts;
         if(d.today){document.getElementById('sIn').textContent=d.today['in']||0;
           document.getElementById('sOut').textContent=d.today.out||0;}
-        if(EVENTS.length!==lastTotal){lastTotal=EVENTS.length;renderCal();renderHist();renderCalDay();}})
+        var ds=JSON.stringify(d.days||{});
+        if(ds!==lastDays){lastDays=ds;DAYS=d.days;renderStrip();
+          if(selDay){delete dayCache[selDay];renderCalDay();}}})
       .catch(function(){});
   }
   setInterval(refreshData,8000);
@@ -940,13 +902,16 @@ Bun.serve({
       return serveTermAsset(decodeURIComponent(url.pathname.slice("/terminal/".length)));
     }
 
-    // Event feed for the calendar/history auto-refresh.
+    // Day counts for the timeline auto-refresh; the day's captures are pulled
+    // separately (and only when a day is open) from /api/day.
     if (url.pathname === "/api/events") {
-      const { cIn, cOut, dayStats, events } = loadEventData();
-      return Response.json({
-        events, days: dayStats, counts: { in: cIn, out: cOut },
-        today: istTodayCounts(),
-      });
+      return Response.json({ days: loadDayStats(), today: istTodayCounts() });
+    }
+
+    if (url.pathname === "/api/day") {
+      const day = url.searchParams.get("d") ?? "";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return new Response("bad day", { status: 400 });
+      return Response.json(loadDay(day));
     }
 
     if (url.pathname === "/live.jpg") {
@@ -1025,8 +990,10 @@ Bun.serve({
     }
 
     if (url.pathname === "/") return Response.redirect("/live", 302);
-    if (url.pathname === "/live" || url.pathname === "/calendar" || url.pathname === "/history") {
-      const view = url.pathname.slice(1) as "live" | "calendar" | "history";
+    // /calendar was renamed to /timeline; keep old links (and ?day=) working.
+    if (url.pathname === "/calendar") return Response.redirect(`/timeline${url.search}`, 302);
+    if (url.pathname === "/live" || url.pathname === "/timeline") {
+      const view = url.pathname.slice(1) as "live" | "timeline";
       const day = url.searchParams.get("day") ?? url.searchParams.get("d");
       return new Response(dashboard(view, day), {
         headers: {

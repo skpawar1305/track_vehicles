@@ -49,6 +49,13 @@
   panel (`/api/live2`, `/live2.jpg`). The Pi opens the RTSP/relay session only while
   `live2_wanted` is set and tears it down ~5 s after the last viewer, so an idle edge
   streams nothing. The main feed's `live_wanted` gate is the same idea.
+- **The `/timeline` view is counts-first; captures load per day on demand.** `GET /api/events`
+  ships only per-day IN/OUT counts (polled every 8 s) and `GET /api/day?d=YYYY-MM-DD`
+  returns one day's events (cached client-side). Don't re-embed the whole event list in the
+  initial HTML — that was the old `/history` page (removed) and it made first paint and
+  month-hopping slow. The UI is a horizontal day-square strip (oldest→newest, today
+  auto-scrolled in), `←`/`→` steps a day and never goes into the future; days with zero
+  captures are still shown. `/calendar` 302-redirects to `/timeline`.
 - **Tracking at low fps: do not use IoU association.** At 10-20 fps a vehicle can move
   farther than its own box between samples, so ByteTrack (IoU) returns nothing after the
   first frame and fast movers are never counted. `run.py` uses a velocity-aware
