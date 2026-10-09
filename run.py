@@ -344,12 +344,17 @@ class CaptureManager:
     THUMB_WIDTH = 640
     THUMB_QUALITY = 80
 
-    def save(self, frame, track_id, direction, bbox):
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-        direction_label = "in" if direction == 1 else "out"
-        filename = f"{ts}_id{track_id}_{direction_label}.jpg"
-        cv2.imwrite(os.path.join(self.capture_dir, filename), frame)
+    @staticmethod
+    def _ts(crossed_at=None):
+        if crossed_at:
+            try:
+                return datetime.fromisoformat(crossed_at).strftime(
+                    "%Y%m%d_%H%M%S_%f")[:-3]
+            except ValueError:
+                pass
+        return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
+    def _thumb(self, frame, filename):
         # Full-frame 16:9 thumbnail (context beats a tight, blurry crop).
         h, w = frame.shape[:2]
         tw = min(self.THUMB_WIDTH, w)
@@ -358,25 +363,24 @@ class CaptureManager:
         cv2.imwrite(os.path.join(self.capture_dir, "thumb", filename), thumb,
                     [cv2.IMWRITE_JPEG_QUALITY, self.THUMB_QUALITY])
 
-        return {"filename": filename, "thumb": f"thumb/{filename}", "timestamp": ts,
-                "track_id": track_id, "direction": direction_label}
+    def store_crossing(self, frame, jpeg, track_id, direction, crossed_at=None):
+        """Persist one crossing.
 
-    def save_jpeg(self, data, track_id, direction):
-        """Persist an already-encoded JPEG (e.g. a camera main-stream still)."""
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        The full image prefers the camera's main-stream still (`jpeg`); the
+        thumbnail is ALWAYS built from the substream `frame` captured at the
+        crossing, so the timeline shows the vehicle at the line rather than the
+        delayed main-stream moment. Pass `jpeg=None` to use the substream frame
+        for both, and to fall back when the fetch was late or failed.
+        """
+        ts = self._ts(crossed_at)
         direction_label = "in" if direction == 1 else "out"
         filename = f"{ts}_id{track_id}_{direction_label}.jpg"
-        with open(os.path.join(self.capture_dir, filename), "wb") as f:
-            f.write(data)
-        # Thumbnail needs pixels; decode once (events are sparse).
-        frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-        if frame is not None:
-            h, w = frame.shape[:2]
-            tw = min(self.THUMB_WIDTH, w)
-            th = max(1, int(h * tw / w))
-            thumb = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
-            cv2.imwrite(os.path.join(self.capture_dir, "thumb", filename), thumb,
-                        [cv2.IMWRITE_JPEG_QUALITY, self.THUMB_QUALITY])
+        if jpeg is not None:
+            with open(os.path.join(self.capture_dir, filename), "wb") as f:
+                f.write(jpeg)
+        else:
+            cv2.imwrite(os.path.join(self.capture_dir, filename), frame)
+        self._thumb(frame, filename)
         return {"filename": filename, "thumb": f"thumb/{filename}", "timestamp": ts,
                 "track_id": track_id, "direction": direction_label}
 
@@ -1287,15 +1291,23 @@ def fetch_capture_jpeg(cfg, timeout=6.0):
 
     The camera hardware-encodes the JPEG, so this costs the Pi one HTTP GET and
     no video decode. Returns bytes, or None on any failure.
+
+    A persistent Session keeps the TLS connection and the digest nonce alive
+    between crossings, so the still is fetched with (ideally) a single
+    round-trip and lands as close as possible to the crossing instant.
     """
     import requests
     from requests.auth import HTTPDigestAuth
+    global _CAPTURE_SESSION
     if not cfg.capture_url:
         return None
+    if _CAPTURE_SESSION is None:
+        _CAPTURE_SESSION = requests.Session()
     try:
-        r = requests.get(cfg.capture_url,
-                         auth=HTTPDigestAuth(cfg.capture_user, cfg.capture_password),
-                         verify=False, timeout=timeout)
+        r = _CAPTURE_SESSION.get(
+            cfg.capture_url,
+            auth=HTTPDigestAuth(cfg.capture_user, cfg.capture_password),
+            verify=False, timeout=timeout)
         if r.ok and r.content and r.headers.get("content-type", "").startswith("image/"):
             return r.content
     except Exception:
@@ -1303,26 +1315,43 @@ def fetch_capture_jpeg(cfg, timeout=6.0):
     return None
 
 
+_CAPTURE_SESSION = None
+
+# How long a queued crossing may wait for the main-stream snapshot before we
+# stop trusting the fetch and fall back to the (accurately-timed) substream
+# frame for the full image as well.
+CAPTURE_MAX_AGE = float(os.environ.get("TRACKER_CAPTURE_MAX_AGE", "1.5"))
+
+
 def capture_loop(cfg, capture_mgr, store, capture_q):
     """Persist crossings on a worker thread (fetch/save off the track loop).
 
-    Prefers a full-resolution main-stream still; falls back to the processed
-    substream frame when the snapshot is unavailable.
+    Prefers a full-resolution main-stream still for the full image; the
+    thumbnail always comes from the substream frame captured at the crossing.
+    If the snapshot is stale (the worker was busy with earlier crossings) or
+    unavailable, the substream frame is used for the full image too — an
+    accurately-timed low-res frame beats a crisp frame of the wrong moment.
     """
     while cfg.running:
         try:
             item = capture_q.get(timeout=1.0)
         except Empty:
             continue
-        entry = None
-        jpeg = fetch_capture_jpeg(cfg)
+        jpeg = None
+        age = time.time() - item.get("enqueued_at", time.time())
+        if age <= CAPTURE_MAX_AGE:
+            jpeg = fetch_capture_jpeg(cfg)
         if jpeg is not None:
-            entry = capture_mgr.save_jpeg(jpeg, item["track_id"], item["direction"])
+            entry = capture_mgr.store_crossing(
+                item["frame"], jpeg, item["track_id"], item["direction"],
+                item["crossed_at"])
             print(f"[capture] ID#{item['track_id']} main-stream ({len(jpeg) // 1024}KB)")
-        if entry is None:
-            entry = capture_mgr.save(item["frame"], item["track_id"],
-                                     item["direction"], item["bbox"])
-            print(f"[capture] ID#{item['track_id']} substream fallback")
+        else:
+            entry = capture_mgr.store_crossing(
+                item["frame"], None, item["track_id"], item["direction"],
+                item["crossed_at"])
+            why = "stale" if age > CAPTURE_MAX_AGE else "fallback"
+            print(f"[capture] ID#{item['track_id']} substream ({why}, {age:.2f}s)")
         cfg.add_capture(entry)
         store.add({
             "id": entry["filename"].rsplit(".", 1)[0],
@@ -1569,6 +1598,7 @@ def main():
                         "direction": crossing, "bbox": list(obj.bbox),
                         "line": line_px, "frame": frame.copy(),
                         "crossed_at": datetime.now(timezone.utc).isoformat(),
+                        "enqueued_at": time.time(),
                     })
                 except Full:
                     pass
