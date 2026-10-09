@@ -39,7 +39,7 @@ def main():
     ap.add_argument("--url", required=True)
     ap.add_argument("--seconds", type=float, default=20.0)
     ap.add_argument("--conf", type=float, default=0.35)
-    ap.add_argument("--classes", default="2,3,5,7")
+    ap.add_argument("--classes", default="2,5,7")
     ap.add_argument("--roi", help="ROI as JSON: '[[x,y],[x,y],[x,y],[x,y]]'")
     ap.add_argument("--out", default="/tmp/opencode/stream_sample.jpg")
     args = ap.parse_args()

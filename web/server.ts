@@ -59,8 +59,9 @@ type CamConfig = {
 };
 const DEFAULT_CONFIG: CamConfig = {
   line: null, roi: null, flip_sides: false,
-  enabled_classes: [2, 3, 5, 7], source_w: null, source_h: null,
+  enabled_classes: [2, 5, 7], source_w: null, source_h: null,
 };
+const TWO_WHEELER_CLASSES = new Set([1, 3]); // COCO bicycle and motorcycle
 
 function getConfig(): CamConfig & { updated_at: string | null } {
   const row = sqlite
@@ -68,7 +69,15 @@ function getConfig(): CamConfig & { updated_at: string | null } {
     .get() as { data: string; updated_at: string } | null;
   if (!row) return { ...DEFAULT_CONFIG, updated_at: null };
   try {
-    return { ...DEFAULT_CONFIG, ...JSON.parse(row.data), updated_at: row.updated_at };
+    const stored = JSON.parse(row.data);
+    return {
+      ...DEFAULT_CONFIG,
+      ...stored,
+      enabled_classes: Array.isArray(stored.enabled_classes)
+        ? stored.enabled_classes.map(Number).filter((n: number) => Number.isFinite(n) && !TWO_WHEELER_CLASSES.has(n))
+        : DEFAULT_CONFIG.enabled_classes,
+      updated_at: row.updated_at,
+    };
   } catch {
     return { ...DEFAULT_CONFIG, updated_at: row.updated_at };
   }
@@ -529,7 +538,7 @@ if(VIEW!=='live'){
 var setup=document.getElementById('setup'),S2=document.getElementById('snap2'),O=document.getElementById('ov'),msg=document.getElementById('msg');
 document.getElementById('setupBtn').onclick=function(){setup.classList.remove('hidden');S2.src='/live.jpg?'+Date.now();};
 document.getElementById('closeSetup').onclick=function(){setup.classList.add('hidden');};
-var cfg={line:null,roi:null,flip_sides:false,enabled_classes:[2,3,5,7]};
+var cfg={line:null,roi:null,flip_sides:false,enabled_classes:[2,5,7]};
 var mode=null,dl=[],da=[];
 var NS='http://www.w3.org/2000/svg';
 function el(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);
@@ -742,7 +751,7 @@ Bun.serve({
         roi: norm(body.roi),
         flip_sides: Boolean(body.flip_sides),
         enabled_classes: Array.isArray(body.enabled_classes)
-          ? body.enabled_classes.map(Number).filter((n) => Number.isFinite(n))
+          ? body.enabled_classes.map(Number).filter((n) => Number.isFinite(n) && !TWO_WHEELER_CLASSES.has(n))
           : DEFAULT_CONFIG.enabled_classes,
         source_w: Number.isFinite(body.source_w) ? Number(body.source_w) : null,
         source_h: Number.isFinite(body.source_h) ? Number(body.source_h) : null,

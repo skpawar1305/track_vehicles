@@ -338,9 +338,9 @@ function loadCaptures() {
   });
 }
 function loadVehicleTypes() {
-  const CLASSES = {2:'car',3:'motorcycle',5:'bus',7:'truck'};
+  const CLASSES = {2:'car',5:'bus',7:'truck'};
   fetch('/api/config').then(r=>r.json()).then(d=>{
-    const enabled = d.enabled_classes || [2,3,5,7];
+    const enabled = d.enabled_classes || [2,5,7];
     document.getElementById('vehicle-checks').innerHTML = Object.entries(CLASSES).map(([id,name])=>{
       const checked = enabled.includes(parseInt(id)) ? 'checked' : '';
       return `<label style="display:flex;align-items:center;gap:4px;padding:2px 6px;background:#2a2a2a;border-radius:4px;cursor:pointer"><input type="checkbox" value="${id}" ${checked} onchange="saveVehicleTypes()"> ${name}</label>`;

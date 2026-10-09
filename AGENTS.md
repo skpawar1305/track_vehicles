@@ -10,8 +10,9 @@
 ## Project
 - Edge vehicle line-counter: RTSP -> detector (YOLO26n INT8 via ncnn) -> centroid
   tracker -> crossing gate -> offline SQLite -> HTTPS sync to a Bun/VPS dashboard.
-- Edge runs on a Raspberry Pi 5 (DietPi); input is the NVR's H.264 substream
-  (`.../unicast/c11/s1/live`, currently 640x360 @20fps).
+- Edge runs on a Raspberry Pi 5 (DietPi); input is a CCTV camera's H.264 substream
+  (ONVIF path `.../Streaming/Channels/102`, 640x360). The camera's RTSP Digest is
+  SHA-256-only, so capture goes through `rtsp_relay.RtspRelay` (`"relay": true`).
 - `run.py` is the production edge loop. Dev harnesses: `tools/live_push.py` (mimics it
   from a laptop, can push to the VPS) and `tools/test_clip.py` (runs the production
   tracker/crossing over a video file and reports IN/OUT).
@@ -23,6 +24,17 @@
   returning ~100 garbage boxes forever). Copy frames handed between threads.
 - Ultralytics' ncnn export breaks non-square models; use `pnnx` directly.
 - The NVR has no MJPEG/JPEG endpoint; browsers cannot play raw RTSP — do not assume.
+- **RTSP Digest is MD5-only in FFmpeg — SHA-256 cameras need the relay.** Every
+  FFmpeg-backed reader (OpenCV `CAP_FFMPEG`, PyAV, `imageio-ffmpeg`, GStreamer `rtspsrc`)
+  negotiates RTSP Digest with MD5 and gets `401` from a camera that challenges
+  `algorithm="SHA-256"` (the PT-NC120D3-WNM(D2) does; credentials are valid). `rtsp_relay.py`
+  does the SHA-256 `OPTIONS/DESCRIBE/SETUP/PLAY` handshake itself, asks the camera for
+  RTP/UDP on a loopback port, writes an SDP, and keepalives with `GET_PARAMETER`; OpenCV
+  decodes the SDP. Enable with `"relay": true` in `config.json` / `TRACKER_RTSP_RELAY=1`.
+  OpenCV snapshots `OPENCV_FFMPEG_CAPTURE_OPTIONS` at process start, so `run.py` re-execs
+  once with `protocol_whitelist;file,udp,rtp,rtsp,tcp` (guarded by `TRACKER_RELAY_REEXEC`) —
+  setting the env in-process alone does nothing. The UDP return path needs camera and Pi on
+  the same LAN. Discover an unknown RTSP path via ONVIF `GetStreamUri` (WS-UsernameToken).
 - **Tracking at low fps: do not use IoU association.** At 10-20 fps a vehicle can move
   farther than its own box between samples, so ByteTrack (IoU) returns nothing after the
   first frame and fast movers are never counted. `run.py` uses a velocity-aware
@@ -63,7 +75,9 @@
 - `ncnn`'s wheel declares the GUI `opencv-python` (needs libxcb); first-boot.sh replaces
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads
-  them live, so no restart is needed. Dumpers = COCO class 7 (truck).
+  them live, so no restart is needed. Dumpers = COCO class 7 (truck). Two-wheelers
+  (COCO 1 bicycle, 3 motorcycle) are filtered out in `run.py` *and* on the VPS, so the
+  UI offers only car/bus/truck (2/5/7).
 - **`/terminal` is a reverse WebSocket, not inbound SSH.** `term_agent.py` dials the VPS
   (`/api/term?role=agent`, Bearer) and bridges the socket to a local PTY; the browser
   attaches with a short-lived token from the Basic-auth page. Keep it outbound-only —

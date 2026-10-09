@@ -1,12 +1,44 @@
-import json, threading, time, os
+import json, threading, time, os, sys
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Queue, Empty, Full
+
+
+def _enable_relay_capture_opts():
+    """Allow FFmpeg to open the RTP source of the local relay SDP.
+
+    OpenCV/FFmpeg snapshot OPENCV_FFMPEG_CAPTURE_OPTIONS at process start, so
+    changing it in-process has no effect: when the SHA-256 relay is enabled we
+    re-exec once with the variable set. Runs before OpenCV is imported.
+    """
+    if os.environ.get("TRACKER_RELAY_REEXEC") == "1":
+        print("[relay] FFmpeg options:",
+              os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", ""), flush=True)
+        return
+    try:
+        with open("config.json") as f:
+            relay = bool(json.load(f).get("relay", False))
+    except Exception:
+        relay = False
+    if not (relay or os.environ.get("TRACKER_RTSP_RELAY") == "1"):
+        return
+    opts = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "")
+    if "protocol_whitelist" in opts:
+        return
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+        opts + "|" if opts else "") + "protocol_whitelist;file,udp,rtp,rtsp,tcp"
+    os.environ["TRACKER_RELAY_REEXEC"] = "1"
+    print("[relay] re-exec with FFmpeg options:", opts, flush=True)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+_enable_relay_capture_opts()
 
 import cv2
 import numpy as np
 import ncnn
 from store import Store
+from rtsp_relay import RtspRelay
 
 MODEL_DIR = Path(__file__).resolve().parent / "models"
 MODEL_PARAM = str(MODEL_DIR / "nanodet_plus_m_1.5x_416.ncnn.param")
@@ -33,6 +65,12 @@ NUM_THREADS = int(os.environ.get("TRACKER_THREADS", "4"))
 # A healthy frame yields a handful of vehicles; a corrupt/desynced HEVC frame can
 # make the detector hallucinate hundreds. Treat such frames as invalid.
 MAX_DETECTIONS_PER_FRAME = int(os.environ.get("TRACKER_MAX_DETS", "50"))
+DEFAULT_ENABLED_CLASSES = [2, 5, 7]  # cars, buses, and trucks; exclude bicycles/motorcycles
+EXCLUDED_TWO_WHEELER_CLASSES = {1, 3}  # COCO bicycle and motorcycle
+
+
+def _counting_classes(classes):
+    return [int(c) for c in classes if int(c) not in EXCLUDED_TWO_WHEELER_CLASSES]
 
 # ── Config ────────────────────────────────────────────────────────────
 CONFIG_PATH = "config.json"
@@ -49,7 +87,7 @@ class Config:
         self.flip_sides = False
         self.capture_dir = "captures"
         self.max_captures = 1000
-        self.enabled_classes = [2, 3, 5, 7]
+        self.enabled_classes = DEFAULT_ENABLED_CLASSES.copy()
         self.detector = os.environ.get("TRACKER_DETECTOR", "hybrid")  # "hybrid" | "motion" | "yolo"
         self.motion_scale = float(os.environ.get("TRACKER_MOTION_SCALE", "0.5"))
         self.motion_min_area = int(os.environ.get("TRACKER_MOTION_MIN_AREA", "12"))
@@ -68,6 +106,9 @@ class Config:
             "TRACKER_CONFIG_URL", _live.replace("/api/live", "/api/config") if _live else "")
         self.config_updated_at = None
         self.live_wanted = False   # set true by server while a viewer is connected
+        # Cameras whose RTSP Digest is SHA-256 (OpenCV's FFmpeg only does MD5)
+        # are reached through the local RtspRelay UDP->SDP shim.
+        self.relay = os.environ.get("TRACKER_RTSP_RELAY", "0") == "1"
         self._load()
 
     def _load(self):
@@ -85,7 +126,9 @@ class Config:
                 self.capture_dir = os.environ.get(
                     "TRACKER_CAPTURE_DIR", data.get("capture_dir", "captures"))
                 self.max_captures = data.get("max_captures", 1000)
-                self.enabled_classes = data.get("enabled_classes", [2, 3, 5, 7])
+                self.enabled_classes = _counting_classes(
+                    data.get("enabled_classes", DEFAULT_ENABLED_CLASSES))
+                self.relay = bool(data.get("relay", self.relay))
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
@@ -95,7 +138,7 @@ class Config:
                     "norm_line": self.norm_line, "norm_roi": self.norm_roi,
                     "conf_thresh": self.conf_thresh, "flip_sides": self.flip_sides,
                     "capture_dir": self.capture_dir, "max_captures": self.max_captures,
-                    "enabled_classes": self.enabled_classes}
+                    "enabled_classes": self.enabled_classes, "relay": self.relay}
         with open(CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
 
@@ -116,7 +159,7 @@ class Config:
         with self.lock: self.flip_sides = flip
         self.save()
     def set_enabled_classes(self, classes):
-        with self.lock: self.enabled_classes = [int(c) for c in classes]
+        with self.lock: self.enabled_classes = _counting_classes(classes)
         self.save()
 
     def apply_remote(self, data):
@@ -126,7 +169,7 @@ class Config:
             self.norm_roi = data.get("roi")
             self.flip_sides = bool(data.get("flip_sides", False))
             if data.get("enabled_classes"):
-                self.enabled_classes = [int(c) for c in data["enabled_classes"]]
+                self.enabled_classes = _counting_classes(data["enabled_classes"])
             self.config_updated_at = data.get("updated_at")
         self.save()
 
@@ -364,6 +407,7 @@ class NanoDetNcnn:
         scores  = cls_scores[np.arange(cls_scores.shape[0]), cls_ids]
 
         mask = scores >= self.conf_thresh
+        mask &= ~np.isin(cls_ids, tuple(EXCLUDED_TWO_WHEELER_CLASSES))
         if enabled_classes:
             mask &= np.isin(cls_ids, enabled_classes)
         if not mask.any():
@@ -495,6 +539,7 @@ class YoloNcnn:
         scores = cls_scores[np.arange(cls_scores.shape[0]), cls_ids]
 
         mask = scores >= self.conf_thresh
+        mask &= ~np.isin(cls_ids, tuple(EXCLUDED_TWO_WHEELER_CLASSES))
         if enabled_classes:
             mask &= np.isin(cls_ids, enabled_classes)
         if not mask.any():
@@ -967,6 +1012,8 @@ def detect_loop(detector, cfg, latest, shared, stop):
 def reader_loop(cfg, latest):
     """Reads camera frames and stores the latest one for detect + tracking."""
     cap = None
+    relay = None
+    relay_url = None
     last_read_t = 0.0
     read_interval = 0.0
     prev_gray = None
@@ -984,9 +1031,33 @@ def reader_loop(cfg, latest):
             # v4l2h264dec) to move decode off the CPU that YOLO needs.
             pipeline = os.environ.get("TRACKER_CAPTURE_PIPELINE", "")
             if pipeline:
-                cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+                source, api = pipeline, cv2.CAP_GSTREAMER
+            elif cfg.relay:
+                # SHA-256 RTSP Digest camera: FFmpeg can't authenticate, so an
+                # RtspRelay terminates auth and re-serves RTP as a local SDP.
+                if relay is not None and relay_url != url:
+                    relay.stop(); relay = None
+                if relay is None:
+                    relay = RtspRelay(
+                        url,
+                        sdp_path=os.environ.get(
+                            "TRACKER_RELAY_SDP", "/tmp/tracker_rtsp_relay.sdp"),
+                        local_port=int(os.environ.get("TRACKER_RELAY_PORT", "5004")),
+                        auth=os.environ.get("TRACKER_RELAY_AUTH", "sha256"))
+                    relay_url = url
+                    relay.start()
+                if not relay.ready.wait(timeout=12):
+                    print("[reader] RTSP relay not ready, retrying in 5s...")
+                    relay.stop(); relay = None
+                    time.sleep(5); continue
+                opts = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "")
+                if "protocol_whitelist" not in opts:
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                        opts + "|" if opts else "") + "protocol_whitelist;file,udp,rtp"
+                source, api = relay.sdp_path, cv2.CAP_FFMPEG
             else:
-                cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+                source, api = url, cv2.CAP_FFMPEG
+            cap = cv2.VideoCapture(source, api)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # keep only the newest frame
             if not cap.isOpened():
                 print("[reader] Failed to open stream, retrying in 5s...")
@@ -994,7 +1065,10 @@ def reader_loop(cfg, latest):
             video_fps = cap.get(cv2.CAP_PROP_FPS)
             read_interval = 1.0 / video_fps if video_fps > 0 else 0.0
             last_read_t = time.time()
-            print(f"[reader] Stream connected ({video_fps:.2f} fps)")
+            if cfg.relay and not pipeline:
+                print(f"[reader] Stream via RTSP relay ({video_fps:.2f} fps)")
+            else:
+                print(f"[reader] Stream connected ({video_fps:.2f} fps)")
 
         # Pace reads to match video's native framerate
         if read_interval > 0:
@@ -1024,6 +1098,8 @@ def reader_loop(cfg, latest):
 
     if cap is not None:
         cap.release()
+    if relay is not None:
+        relay.stop()
     print("[reader] Done")
 
 # Live feed target: 360p, best-effort (drop frames rather than block).

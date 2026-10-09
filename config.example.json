@@ -10,8 +10,8 @@
   "max_captures": 1000,
   "enabled_classes": [
     2,
-    3,
     5,
     7
-  ]
+  ],
+  "relay": false
 }

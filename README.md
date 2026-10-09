@@ -6,7 +6,7 @@ RTSP vehicle counting with line-crossing detection. Inference is **YOLO26n INT8*
 
 ```
 ┌──────────────── Pi 5 (DietPi, behind NAT) ─────────────────────────┐
-│ NVR substream 640x360 H.264                                        │
+│ CCTV substream 640x360 H.264 (RtspRelay: SHA-256 Digest)           │
 │   reader thread ─▶ newest frame                                    │
 │   detect thread ─▶ motion latch + YOLO26n INT8 (ncnn)             │
 │   tracking loop ─▶ centroid tracker @ camera rate + crossing gate │
@@ -33,9 +33,10 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 
 ## Detection pipeline
 
-- **Input is the NVR sub-stream** (`.../unicast/c11/s1/live`, 640x360 H.264 @10 fps).
-  It is cheaper to decode than the 1080p main stream and — because it is already 640 wide —
-  gives better small-object recall than downscaling 1080p.
+- **Input is a camera sub-stream** (ONVIF path `.../Streaming/Channels/102`, 640x360
+  H.264). It is cheaper to decode than the 1080p main stream and — because it is already
+  640 wide — gives better small-object recall than downscaling 1080p. Cameras that demand
+  SHA-256 RTSP Digest are reached through `rtsp_relay.py` (see Gotchas).
 - **Motion latch.** A cheap MOG2 + frame-difference gate *arms* detection: the moment
   motion is seen, YOLO runs on every frame for `TRACKER_MOTION_HOLD` seconds (default 60).
   A **heartbeat** (`TRACKER_MOTION_HEARTBEAT`, default 3 s) still runs YOLO periodically
@@ -62,6 +63,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | Path | Purpose |
 |------|---------|
 | `run.py` | Headless edge loop: ncnn detector + centroid tracker + crossing + capture + SQLite |
+| `rtsp_relay.py` | SHA-256 RTSP Digest → local RTP/SDP shim for cameras FFmpeg can't authenticate |
 | `store.py` | Offline-first SQLite event store (+ retention prune) |
 | `sync.py` | HTTP upload worker (retries; deletes after ACK) |
 | `term_agent.py` | Reverse terminal agent: outbound WSS → local PTY shell (for `/terminal`) |
@@ -126,6 +128,7 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_RETENTION_DAYS` | `30` | Local capture/event retention |
 | `TRACKER_VULKAN` | `0` | Optional GPU compute (use fp32 model) |
 | `TRACKER_CAPTURE_PIPELINE` | – | GStreamer pipeline, e.g. Pi hardware `v4l2h264dec` |
+| `TRACKER_RTSP_RELAY` | `0` | Route capture through `RtspRelay` for SHA-256 Digest cameras |
 
 The reverse terminal agent reads its own file, `/etc/tracker/term.env` (plus
 `TRACKER_TOKEN` from `sync.env`):
@@ -232,6 +235,15 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
 - Ultralytics' ncnn export mis-compiles non-square graphs; use `pnnx` directly (handled by
   `tools/export_model.py`).
 - The NVR has no MJPEG/JPEG endpoint, and browsers cannot play raw RTSP.
+- **SHA-256 RTSP Digest cameras:** FFmpeg (and therefore OpenCV's capture
+  backend) negotiates RTSP Digest with MD5 only and returns `401` against a
+  camera that challenges with `algorithm="SHA-256"` (e.g. the PT-NC120D3-WNM(D2)
+  at `.../Streaming/Channels/102`). Set `"relay": true` in `config.json` (or
+  `TRACKER_RTSP_RELAY=1`): `rtsp_relay.RtspRelay` does the SHA-256 handshake
+  itself, asks the camera for RTP/UDP on a loopback port, writes an SDP, and
+  OpenCV decodes that instead. It needs the camera and Pi on the same LAN
+  (UDP return path). Use ONVIF `GetStreamUri` to discover the correct RTSP path
+  when a new camera's URL is unknown.
 
 ## License
 

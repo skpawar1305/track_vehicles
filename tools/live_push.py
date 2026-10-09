@@ -170,10 +170,10 @@ def main():
         det_classes = None
     elif args.detector == "yolo":
         det = YoloNcnn(conf_thresh=args.conf)
-        det_classes = [2, 3, 5, 7]
+        det_classes = [2, 5, 7]
     else:
         det = HybridDetector(conf_thresh=args.conf)
-        det_classes = [2, 3, 5, 7]
+        det_classes = [2, 5, 7]
     print(f"[live] detector={args.detector}")
     # frame_rate only sets the lost-track buffer size (buffer = frame_rate/30 * track_buffer);
     # keep frame_rate=30 so track_buffer is in processed frames (~8s at 5fps).

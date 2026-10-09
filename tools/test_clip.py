@@ -55,7 +55,7 @@ def main():
     ap.add_argument("--seconds", type=float, default=90.0)
     ap.add_argument("--line", default="0.05,0.62,0.95,0.62")
     ap.add_argument("--conf", type=float, default=0.30)
-    ap.add_argument("--classes", default="2,3,5,7")
+    ap.add_argument("--classes", default="2,5,7")
     ap.add_argument("--min-age", type=int, default=1)
     ap.add_argument("--min-travel-frac", type=float, default=0.02)
     ap.add_argument("--cross-margin-frac", type=float, default=0.015)
