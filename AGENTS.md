@@ -83,8 +83,8 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   Ultralytics `agnostic_nms` equivalent. A crossing-level de-dupe safety net
   (same direction, IoU > `TRACKER_DUP_IOU`, within `TRACKER_CROSS_DEDUP_S`,
   default 1 s) guarantees one vehicle = one event. Do **not** try to fix this in
-  the centroid tracker: it is a detector problem. (ByteTrack/BoT-SORT are also
-  unattractive here — see the tracker notes below — but this bug is not the reason.)
+  the tracker: it is a detector problem, and any tracker would mint two tracks from
+  two boxes.
 - **Offline is safe, but never prune unsynced rows.** `store.prune` deletes only
   `synced=1` events past `TRACKER_RETENTION_DAYS`; unsynced captures are the only
   copy while the VPS is unreachable and must be kept until `sync.py` gets a 2xx.
@@ -110,34 +110,31 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   To tell a *duplicated* frame from a *static* one, use the container timestamp
   (`CAP_PROP_POS_MSEC`), not pixel diffs; the reader's `fresh` flag is for the stall case
   below, not normal operation.
-- **Do not use bare IoU association across stream stalls.** Frame-to-frame at ~25 fps,
-  IoU tracking is viable in principle. But the substream does stall for seconds; across
-  such a gap the vehicle moves far more than its own box, IoU is 0, and a ByteTrack-style
-  tracker drops the track exactly when a crossing can happen. `run.py` uses a
-  velocity-aware *centroid* tracker with wall-clock extrapolation so the track survives
-  the gap; that (plus no heavy deps) is the reason it is kept, not the base frame rate.
-  The edge does not need `bytetracker` (only the dev harnesses do).
+- **IoU association, but on a velocity-predicted box.** Frame-to-frame at ~25 fps a plain
+  IoU tracker works. Use the track's last box *translated by px/second velocity over the
+  elapsed time* (`_pred_box`), not the raw last box: across a multi-second stall the raw
+  box has 0 IoU with the moved vehicle, while the extrapolated one still overlaps. There is
+  no distance/centroid association fallback — if the predicted IoU is below
+  `TRACKER_IOU_GATE` (0.2, == ByteTrack's `match_thresh` 0.8) the track simply coasts.
+  Association is greedy (best IoU first); `bytetracker` is not used (only the dev harnesses).
 - **Crossing needs hysteresis, not a bare side-change.** A low-confidence box near
   the line jitters across it and registers false IN/OUT. `CrossingGate.crossing` commits each
   track to a side and requires the centroid to emerge >= `TRACKER_CROSS_MARGIN_FRAC` of the
   frame height past the line, within the drawn segment.
 - **A stream freeze must not drop the track — or it silently loses a count.**
-  If the stream blocks for seconds, the vehicle has moved far more than one frame's
-  worth by the time frames resume; a per-frame centroid prediction then misses the
-  detection, a *new* track id is minted already past the line, and its crossing has no
-  opposite-side history to fire on. `CentroidTracker` therefore keeps velocity in
-  px/second and extrapolates by wall-clock (`now`), widening the association gate with
-  the gap (`TRACKER_ASSOC_GAP_FRAC`, capped by `TRACKER_ASSOC_MAX_FRAC`). Do not revert
-  to per-frame velocity/prediction.
-- **…but cap the extrapolation and ignore repeated frames.** Linear extrapolation over
-  a multi-second gap can fling the predicted centroid off-frame, past the widened gate,
-  so the detection is still missed: `TRACKER_ASSOC_PRED_CAP` (default 0.5 s) bounds how
-  far a track advances per update (the widened gate does the re-acquisition, so the cap
-  can be short). And if the NVR repeats its last frame while stalled,
-  feeding that identical image while wall-clock advances collapses velocity to zero;
-  the reader flags it `fresh=False`, the tracker is not advanced on it (the live relay
-  still is, so the dashboard doesn't 10 s-timeout), and the real gap is measured on the
-  next genuinely-new frame.
+  If the stream blocks for seconds, the vehicle moves far more than one frame's worth by the
+  time frames resume; a raw-box IoU match then fails, a *new* track id is minted already past
+  the line, and its crossing has no opposite-side history to fire on. `CentroidTracker` keeps
+  velocity in px/second and extrapolates the box by wall-clock (`now`) for association, so the
+  track (and its crossing side history) survives the gap. Do not revert to matching the stale
+  last box.
+- **Cap the coasted display position; ignore repeated frames.** The centroid used for the
+  live overlay is extrapolated by at most `TRACKER_ASSOC_PRED_CAP` (0.5 s) so it can't fly
+  off-frame (association itself uses the full gap, since a wrong prediction only costs an
+  IoU miss). If the camera repeats its last frame while stalled, feeding that identical image
+  while wall-clock advances would collapse velocity to zero; the reader flags it `fresh=False`,
+  the tracker is not advanced on it (the live relay still is, so the dashboard doesn't
+  10 s-timeout), and the real gap is measured on the next genuinely-new frame.
 - **Never let numpy scalars reach `json.dumps`/`store.add`.** `detect_roi` used to take
   `max(0, pts[:,0].min())` straight from a numpy ROI, so every bbox/centroid carried
   `np.int32`. `store.add`'s `json.dumps(bbox)` then raised, and because persistence runs

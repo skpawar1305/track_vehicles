@@ -1,16 +1,15 @@
 # Vehicle Line Counter
 
 RTSP vehicle counting with line-crossing detection. Inference is **YOLO26n INT8** via
-**ncnn** (ARM-optimised), tracking is a **velocity-aware centroid tracker** (gap-resilient,
-not IoU), the edge store is **offline-first SQLite**, and the dashboard is
-**Bun + Drizzle + SQLite** on a VPS.
+**ncnn** (ARM-optimised), tracking is a **velocity-predicted IoU tracker**, the edge store
+is **offline-first SQLite**, and the dashboard is **Bun + Drizzle + SQLite** on a VPS.
 
 ```
 ┌──────────────── Pi 5 (DietPi, behind NAT) ─────────────────────────┐
 │ CCTV substream 640x360 H.264 (RtspRelay: SHA-256 Digest)           │
 │   reader thread ─▶ newest frame                                    │
 │   detect thread ─▶ motion latch + YOLO26n INT8 (ncnn)             │
-│   tracking loop ─▶ centroid tracker @ camera rate + crossing gate │
+│   tracking loop ─▶ IoU tracker @ camera rate + crossing gate       │
 │   captures → JPEG + SQLite (offline) ; sync worker → HTTPS POST   │
 │   terminal agent ─▶ outbound WSS → dashboard /terminal (PTY shell)│
 └────────────────────────────────────────────────────────────────────┘
@@ -47,13 +46,12 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
   fresh detections the tracker is fed an empty set and **coasts** the tracks forward
   (constant velocity), so the crossing test samples at frame rate (YOLO is ~27 ms/frame
   ≈ 37 fps on the Pi 5, so detection keeps up).
-- **Centroid tracking, not IoU.** Frame-to-frame at ~25 fps IoU association would work, but
-  the substream stalls for seconds at a time; across such a gap a fast vehicle moves far
-  more than its own box, IoU is 0, and a ByteTrack-style tracker loses it exactly when a
-  crossing can happen. Association is instead by *predicted centroid distance*
-  (`TRACKER_ASSOC_FRAC`) with wall-clock extrapolation, so the prev→cur centroid segment can
-  still be tested against the line across the gap. This suits sparse traffic; it is not
-  built for dense crowds.
+- **IoU tracking on predicted boxes.** Detections are matched to tracks by IoU
+  (`TRACKER_IOU_GATE`) against each track's *velocity-predicted* box — the last box
+  translated by its px/second velocity over the elapsed time. Frame-to-frame at ~25 fps
+  the shift is negligible (a standard IoU tracker); across a multi-second stream stall the
+  box is extrapolated forward so a genuine constant-velocity detection still overlaps.
+  No appearance model; suits sparse traffic, not dense crowds.
 - **Crossing test (hysteresis).** Each track commits to a side of the line; a crossing
   counts only when the centroid emerges ≥ `TRACKER_CROSS_MARGIN_FRAC` of the frame height
   past the line on the other side, with its projection inside the drawn segment. This
@@ -66,7 +64,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 
 | Path | Purpose |
 |------|---------|
-| `run.py` | Headless edge loop: ncnn detector + centroid tracker + crossing + capture + SQLite |
+| `run.py` | Headless edge loop: ncnn detector + IoU tracker + crossing + capture + SQLite |
 | `rtsp_relay.py` | SHA-256 RTSP Digest → local RTP/SDP shim for cameras FFmpeg can't authenticate |
 | `store.py` | Offline-first SQLite event store (+ retention prune) |
 | `sync.py` | HTTP upload worker (retries; deletes after ACK) |
@@ -128,8 +126,9 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_MOTION_SCALE` / `_MIN_AREA` | `0.5` / `12` | Motion-gate sensitivity |
 | `TRACKER_MIN_TRACK_AGE` / `_MIN_TRAVEL_FRAC` | `1` / `0.02` | Crossing gate |
 | `TRACKER_CROSS_MARGIN_FRAC` | `0.015` | Hysteresis past the line (fraction of frame height) |
-| `TRACKER_ASSOC_FRAC` | `0.2` | Max centroid-association distance (fraction of frame width) |
+| `TRACKER_IOU_GATE` | `0.2` | Min IoU with the velocity-predicted box to match a detection |
 | `TRACKER_TRACK_MAX_AGE` | `25` | Frames a track coasts with no detection before dropping |
+| `TRACKER_ASSOC_PRED_CAP` | `0.5` | Cap (s) on the coasted-centroid extrapolation used for display |
 | `TRACKER_RETENTION_DAYS` | `30` | Local capture/event retention |
 | `TRACKER_VULKAN` | `0` | Optional GPU compute (use fp32 model) |
 | `TRACKER_CAPTURE_PIPELINE` | – | GStreamer pipeline, e.g. Pi hardware `v4l2h264dec` |
@@ -312,10 +311,10 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
   classes (car/truck), which would otherwise become two tracks and two counts. A
   class-agnostic NMS (`TRACKER_DUP_IOU`, default 0.6) merges them at the detector
   (the Ultralytics `agnostic_nms` equivalent), and a crossing-level de-dupe
-  (`TRACKER_CROSS_DEDUP_S`, default 1 s) guarantees one event. Counting stays on a
-  velocity-aware centroid tracker, not ByteTrack/BoT-SORT, because the substream
-  stalls for seconds and IoU association loses the vehicle across such a gap
-  (a genuine ~25 fps stream, but the gap is the problem, not the base frame rate).
+  (`TRACKER_CROSS_DEDUP_S`, default 1 s) guarantees one event. Counting uses a
+  velocity-predicted IoU tracker (`TRACKER_IOU_GATE`, default 0.2): no custom
+  distance metric, and the predicted box keeps the vehicle matchable across a
+  multi-second stall.
 - **Offline-first, and unsynced rows are never pruned.** Events and images queue
   locally until `sync.py` gets a 2xx from the VPS, which is the only point a local
   file is deleted. `store.prune` only removes `synced=1` rows older than

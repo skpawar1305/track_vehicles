@@ -686,7 +686,7 @@ class YoloNcnn:
 
         # Cross-class merge: the model often fires two near-identical boxes for
         # ONE vehicle with different winning classes (car+truck, bus+truck). The
-        # per-class NMS above keeps both, the centroid tracker then mints a
+        # per-class NMS above keeps both, the tracker then mints a
         # second track, and both cross the line -> a double count. Suppress
         # across classes at a high IoU so only genuine adjacent vehicles (low
         # overlap) both survive.
@@ -889,7 +889,7 @@ def segment_crosses_line(line, old_centroid, new_centroid):
     o4 = side(ox, oy, nx, ny, bx, by)
     return (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0)
 
-# ── Centroid Tracker (gap/stall resilient) ────────────────────────────
+# ── IoU Tracker (velocity-predicted boxes) ────────────────────────────
 class TrackInfo:
     """Lightweight tracked object wrapper for crossing detection & annotation."""
     __slots__ = ('track_id', 'bbox', 'label', 'class_id', 'confidence', 'centroid',
@@ -908,40 +908,30 @@ class TrackInfo:
 
 
 class CentroidTracker:
-    """Velocity-aware nearest-centroid tracker, resilient to stream gaps.
+    """Velocity-aware IoU tracker.
 
-    The substream is a genuine ~25 fps, so frame-to-frame IoU association would
-    work in principle. But it stalls for seconds at a time; across such a gap the
-    vehicle moves far more than its own box, IoU is 0, and a ByteTrack-style
-    tracker drops the track — exactly when a crossing can happen — so the
-    crossing age/travel gates can never be satisfied. This associates by
-    *predicted centroid distance* with wall-clock extrapolation instead, so the
-    track keeps its id across the gap and its prev->cur centroid segment can be
-    tested against the line. Intentionally simple; suits sparse scenes (a road,
-    not a crowd).
+    Detections are associated to tracks by IoU against the track's
+    *velocity-predicted* box (last box translated by px/second velocity over the
+    elapsed time). Frame-to-frame at ~25 fps the shift is tiny, so this behaves
+    like a standard IoU tracker; across a multi-second stream stall the box is
+    extrapolated forward so a genuine constant-velocity detection still overlaps.
+    No appearance model, no distance-based association; intentionally simple and
+    suited to sparse scenes (a road, not a crowd).
     """
 
-    def __init__(self, max_age=25, assoc_frac=0.2, vel_smooth=0.6,
-                 gap_frac=0.5, gap_max_frac=1.0, vel_reset=0.4, pred_cap=0.5,
-                 debug=False):
+    def __init__(self, max_age=25, vel_smooth=0.6, vel_reset=0.4, pred_cap=0.5,
+                 iou_gate=0.2, debug=False):
         self.tracks = {}          # id -> state
         self.next_id = 1
         self.max_age = max_age    # coasted frames before a track is dropped
-        self.assoc_frac = assoc_frac   # baseline association distance = frac * frame_w
         self.vel_smooth = vel_smooth
-        # A frozen/reconnected stream delivers the next frame seconds later, by
-        # which time the vehicle has moved far more than one frame's worth. Widen
-        # the association gate with the elapsed gap and extrapolate by wall-clock
-        # so the track (and its crossing side history) survives the gap.
-        self.gap_frac = gap_frac        # extra gate per second of gap = frac * frame_w
-        self.gap_max_frac = gap_max_frac  # cap, as a fraction of the frame diagonal
         self.vel_reset = vel_reset      # gap (s) after which velocity is re-measured
-        # Cap extrapolation: over a multi-second gap the pre-gap velocity is stale
-        # and linear extrapolation can fling the prediction clean off-frame, so far
-        # from the real detection that even a widened gate misses it. Extrapolating
-        # at most `pred_cap` seconds keeps the anchor near the vehicle; the widened
-        # gate then re-acquires it wherever it actually is.
+        # Cap how far the coasted centroid is extrapolated for display; box
+        # association itself uses the full gap (see _pred_box).
         self.pred_cap = pred_cap
+        # A detection must overlap the track's velocity-predicted box by at least
+        # this IoU to match (0.2 == ByteTrack's match_thresh 0.8).
+        self.iou_gate = iou_gate
         self.debug = debug
 
     def _info(self, tid, det, prev, cur, age):
@@ -949,44 +939,48 @@ class CentroidTracker:
                          det['confidence'], cur, prev, age)
 
     def _advance(self, t, dt):
-        """Extrapolate a track by at most `pred_cap` seconds of its velocity."""
+        """Extrapolate a track's centroid by at most `pred_cap` seconds."""
         dt = min(dt, self.pred_cap)
         return (t['cen'][0] + t['vel'][0] * dt,
                 t['cen'][1] + t['vel'][1] * dt)
 
+    def _pred_box(self, t, dt):
+        """Translate the track's last box by its velocity for IoU association.
+
+        Uses the *full* gap: if the vehicle kept its velocity through a stall the
+        predicted box still overlaps it (velocity is px/second); if it didn't,
+        the IoU simply fails and the track coasts. There is no distance-based
+        association fallback.
+        """
+        bx1, by1, bx2, by2 = t['det']['bbox']
+        vx, vy = t['vel']
+        return (bx1 + vx * dt, by1 + vy * dt, bx2 + vx * dt, by2 + vy * dt)
+
     def update(self, dets, w, h, now=None):
         if now is None:
             now = time.time()
-        # Predict each track's centroid. Velocity is px/second, so time spent
-        # coasting (including a multi-second stream gap) is extrapolated
-        # correctly rather than treated as a single frame of motion.
-        preds = {}
+        # Associate each track to a detection by IoU against the track's
+        # velocity-predicted box. Frame-to-frame the shift is tiny; across a
+        # stall it extrapolates the vehicle forward so a genuine (constant-
+        # velocity) detection still overlaps.
+        cand = []
         for tid, t in self.tracks.items():
             dt = now - t['last_t']
             if dt < 0.0:
                 dt = 0.0
-            px, py = self._advance(t, dt)
-            preds[tid] = (px, py, dt)
-        cand = []
-        for tid, (px, py, dt) in preds.items():
+            pbox = self._pred_box(t, dt)
             for i, d in enumerate(dets):
-                cx, cy = d['centroid']
-                cand.append((((px - cx) ** 2 + (py - cy) ** 2) ** 0.5, tid, i, dt))
-        cand.sort()
+                iou = box_iou(pbox, d['bbox'])
+                if iou >= self.iou_gate:
+                    cand.append((iou, tid, i, dt))
+        cand.sort(key=lambda c: c[0], reverse=True)   # best overlap first
 
-        base = self.assoc_frac * w
-        diag = (w * w + h * h) ** 0.5
-        max_gate = max(base, self.gap_max_frac * diag)
         used_t, used_d, pairs = set(), set(), []
-        for dist, tid, i, dt in cand:
+        for iou, tid, i, dt in cand:
             if tid in used_t or i in used_d:
                 continue
-            gate = min(base + self.gap_frac * w * dt, max_gate)
-            if dist > gate:
-                continue
             if dt >= 1.0 and self.debug:
-                print(f"[track] re-acquired #{tid} after {dt:.1f}s gap "
-                      f"(dist={dist:.0f} gate={gate:.0f})")
+                print(f"[track] matched #{tid} after {dt:.1f}s gap (IoU={iou:.2f})")
             used_t.add(tid); used_d.add(i); pairs.append((tid, i))
 
         objects = []
@@ -1561,13 +1555,12 @@ def main():
         print(f"[main] Hybrid detector: motion-gated YOLO11 "
               f"({YOLO_PARAM.split('/')[-2]}, {NUM_THREADS} threads)")
 
-    # Gap-resilient: associate by predicted centroid distance, not IoU, so a
-    # vehicle that moves far during a multi-second stream stall keeps its id.
+    # IoU association against each track's velocity-predicted box: frame-to-frame
+    # at ~25 fps this is a standard IoU tracker; across a stream stall the box is
+    # extrapolated forward so a constant-velocity detection still overlaps.
     tracker     = CentroidTracker(
         max_age=int(os.environ.get("TRACKER_TRACK_MAX_AGE", "25")),
-        assoc_frac=float(os.environ.get("TRACKER_ASSOC_FRAC", "0.2")),
-        gap_frac=float(os.environ.get("TRACKER_ASSOC_GAP_FRAC", "0.5")),
-        gap_max_frac=float(os.environ.get("TRACKER_ASSOC_MAX_FRAC", "1.0")),
+        iou_gate=float(os.environ.get("TRACKER_IOU_GATE", "0.2")),
         vel_reset=float(os.environ.get("TRACKER_VEL_RESET", "0.4")),
         pred_cap=float(os.environ.get("TRACKER_ASSOC_PRED_CAP", "0.5")),
         debug=os.environ.get("TRACKER_DEBUG") == "1")
@@ -1672,7 +1665,7 @@ def main():
                 else:
                     used_det = dcount
 
-                # Update the centroid tracker with fresh detections (empty list
+                # Update the IoU tracker with fresh detections (empty list
                 # just coasts tracks between detector updates).
                 objects = tracker.update(raw_detections, w, h, now=now_t)
 
