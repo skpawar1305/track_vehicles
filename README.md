@@ -72,6 +72,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/quantize_int8.py` | INT8-quantize an ncnn model (`ncnn2table`/`ncnn2int8`) |
 | `tools/live_push.py` | Dev harness that mimics `run.py` from a laptop (can push to the VPS) |
 | `tools/test_clip.py` | Run the production tracker/crossing over a video clip and report IN/OUT |
+| `tools/set_camera_time.py` | Read/set a camera clock over ONVIF (Manual or NTP) |
 | `web/` | Bun dashboard + ingest API (Drizzle + SQLite) |
 | `deploy/` | systemd units + env examples for the Pi |
 | `models/yolo26n_ncnn_320x320/` | Production model (fp32 + INT8), ROI-matched input |
@@ -244,6 +245,11 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
   OpenCV decodes that instead. It needs the camera and Pi on the same LAN
   (UDP return path). Use ONVIF `GetStreamUri` to discover the correct RTSP path
   when a new camera's URL is unknown.
+- **Camera clock:** the camera ships with a *Manual* clock that is often wrong
+  (the PT-NC120D3 arrived 5h30m behind — local time mistaken for UTC). Read or
+  set it with `tools/set_camera_time.py`; prefer `--set-ntp pool.ntp.org` so it
+  self-corrects. It uses ONVIF `Get/SetSystemDateAndTime` + `SetNTP` with
+  WS-UsernameToken auth (pass the password via `TRACKER_CAM_PASSWORD`).
 
 ## License
 

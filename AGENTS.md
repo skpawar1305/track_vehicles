@@ -35,6 +35,10 @@
   once with `protocol_whitelist;file,udp,rtp,rtsp,tcp` (guarded by `TRACKER_RELAY_REEXEC`) —
   setting the env in-process alone does nothing. The UDP return path needs camera and Pi on
   the same LAN. Discover an unknown RTSP path via ONVIF `GetStreamUri` (WS-UsernameToken).
+- **The camera clock is Manual by default and can be badly off** (the PT-NC120D3 shipped
+  5h30m behind — local time mistaken for UTC). `tools/set_camera_time.py` reads/sets it over
+  ONVIF (`SetSystemDateAndTime` + `SetNTP`, WS-UsernameToken; password via
+  `TRACKER_CAM_PASSWORD`). Keep it on NTP so it self-corrects.
 - **Tracking at low fps: do not use IoU association.** At 10-20 fps a vehicle can move
   farther than its own box between samples, so ByteTrack (IoU) returns nothing after the
   first frame and fast movers are never counted. `run.py` uses a velocity-aware
