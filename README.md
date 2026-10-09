@@ -132,6 +132,7 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_RTSP_RELAY` | `0` | Route capture through `RtspRelay` for SHA-256 Digest cameras |
 | `TRACKER_CAM2_URL` | – | Optional second camera substream shown raw on `/live` (no detection) |
 | `TRACKER_CAPTURE_URL` | derived | Full-res crossing still (ONVIF main-profile snapshot); substream fallback |
+| `TRACKER_CAPTURE_MAX_AGE` | `1.5` | Queue age (s) after which the main-stream fetch is skipped |
 
 The reverse terminal agent reads its own file, `/etc/tracker/term.env` (plus
 `TRACKER_TOKEN` from `sync.env`):
@@ -260,9 +261,14 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
 - **Evidence captures come from the main stream.** Counting runs on the 640×360
   substream, but at each crossing `run.py` fetches a full-resolution still from
   the camera's main-profile ONVIF snapshot (`/onvif-http/snapshot?Profile_1`,
-  camera-side JPEG, SHA-256 Digest) — no extra Pi video decode. It falls back to
-  the processed substream frame if the fetch fails. URL/creds default to the
-  stream URL's (`TRACKER_CAPTURE_URL`/`_USER`/`_PASSWORD` to override).
+  camera-side JPEG, SHA-256 Digest) — no extra Pi video decode — over a reused
+  `requests.Session` and with a queue-age guard (`TRACKER_CAPTURE_MAX_AGE`,
+  default 1.5 s). It falls back to the processed substream frame if the fetch
+  fails or is stale. URL/creds default to the stream URL's
+  (`TRACKER_CAPTURE_URL`/`_USER`/`_PASSWORD` to override). The **thumbnail shown
+  in the timeline is always the substream frame from the crossing instant**, so it
+  is not affected by the main-stream fetch delay; the full-size main-stream still
+  opens when you tap it.
 
 ## License
 

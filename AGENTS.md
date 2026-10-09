@@ -42,8 +42,13 @@
 - **Evidence captures use the main stream, counting uses the substream.** At each
   crossing a worker thread fetches a full-res still from the camera's ONVIF
   snapshot (`/onvif-http/snapshot?Profile_1`, camera-side JPEG, SHA-256 Digest) —
-  so no extra Pi decode — and falls back to the substream frame if the fetch
-  fails. Keep the fetch off the main loop (a network call would stall tracking).
+  so no extra Pi decode. It reuses a `requests.Session` (keeps TLS + the digest
+  nonce alive) and falls back to the substream frame if the fetch fails, is stale
+  (`TRACKER_CAPTURE_MAX_AGE`, default 1.5 s in the queue), or the endpoint is
+  down. Keep the fetch off the main loop (a network call would stall tracking).
+  The **thumbnail is always built from the substream frame at the crossing**, not
+  from the (later) main-stream JPEG, so the timeline shows the vehicle at the line;
+  the main-stream still is the full-size image behind the thumbnail.
 - **A second camera can be shown raw (no detection) with no idle cost.**
   `TRACKER_CAM2_URL` (substream) + `CAM2=1` on the VPS render a second `/live`
   panel (`/api/live2`, `/live2.jpg`). The Pi opens the RTSP/relay session only while
