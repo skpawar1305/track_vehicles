@@ -58,7 +58,7 @@ def main():
     ap.add_argument("--classes", default="2,5,7")
     ap.add_argument("--min-age", type=int, default=1)
     ap.add_argument("--min-travel-frac", type=float, default=0.02)
-    ap.add_argument("--cross-margin-frac", type=float, default=0.015)
+    ap.add_argument("--cross-margin-frac", type=float, default=0.06)
     ap.add_argument("--iou-gate", type=float, default=0.2)
     ap.add_argument("--assoc-frac", type=float, default=0.2)
     ap.add_argument("--out", default="")

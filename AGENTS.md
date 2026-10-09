@@ -120,10 +120,22 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   tracked vehicle whose box changed shape/speed so IoU misses is still re-acquired by
   proximity. Sort key is `(tier, cost)`, so every IoU match beats any fallback and the best
   per-tier match is chosen (greedy; `bytetracker` is not used — only the dev harnesses).
-- **Crossing needs hysteresis, not a bare side-change.** A low-confidence box near
-  the line jitters across it and registers false IN/OUT. `CrossingGate.crossing` commits each
-  track to a side and requires the centroid to emerge >= `TRACKER_CROSS_MARGIN_FRAC` of the
-  frame height past the line, within the drawn segment.
+- **Crossing needs hysteresis, not a bare side-change — and only commit on accept.** A
+  low-confidence box near the line jitters across it and registers false IN/OUT.
+  `CrossingGate.crossing` commits each track to a side and requires the centroid to emerge >=
+  `TRACKER_CROSS_MARGIN_FRAC` of the frame height past the line, within the drawn segment. The
+  flip is only a *candidate*: `crossing()` records it and `allow()` commits it, so a candidate
+  the flicker gate rejects leaves the track on its old side. Flipping eagerly (the old bug)
+  armed the next micro-crossing in the opposite direction, so a parked/working machine on the
+  line alternated IN/OUT every cooldown.
+- **The margin must exceed the detector's box-refit wobble.** A stationary vehicle parked
+  *on* the line is the pathological case: YOLO re-fits the box as its parts move (an
+  excavator's arm swings in/out of the `truck` box), which drags the centroid tens of px
+  across the line with no real transit. `TRACKER_CROSS_MARGIN_FRAC` default is `0.06`
+  (~22 px on the 360p substream). If a loitering machine still false-counts — a big arm can
+  swing the centroid more than the margin — the durable fix is to move the counting line off
+  the machine or shrink the ROI, not to raise the margin further (that starts missing real
+  crossings). See the 2026-10-09 `id7 truck in` false count.
 - **A stream freeze must not drop the track — or it silently loses a count.**
   If the stream blocks for seconds, the vehicle moves far more than one frame's worth by the
   time frames resume; a raw-box IoU match then fails, a *new* track id is minted already past

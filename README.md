@@ -56,9 +56,11 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
   multi-second stall even if the predicted box missed. IoU always wins over the fallback.
   No appearance model; suits sparse traffic, not dense crowds.
 - **Crossing test (hysteresis).** Each track commits to a side of the line; a crossing
-  counts only when the centroid emerges ≥ `TRACKER_CROSS_MARGIN_FRAC` of the frame height
-  past the line on the other side, with its projection inside the drawn segment. This
-  rejects low-confidence boxes that jitter across the line while still catching fast
+  candidate is only *committed* when the flicker gate accepts it, and counts only once the
+  centroid emerges ≥ `TRACKER_CROSS_MARGIN_FRAC` of the frame height past the line on the
+  other side, with its projection inside the drawn segment. A rejected candidate leaves the
+  track on its old side, so a parked/working vehicle on the line can't alternate IN/OUT.
+  This rejects low-confidence boxes that jitter across the line while still catching fast
   movers. A track must also be ≥ `TRACKER_MIN_TRACK_AGE` frames old, have travelled
   ≥ `TRACKER_MIN_TRAVEL_FRAC` of the frame height, and respect a per-track cooldown
   (`CrossingGate`).
@@ -128,7 +130,7 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_MOTION_HEARTBEAT` | `3` | Idle YOLO cadence (s) |
 | `TRACKER_MOTION_SCALE` / `_MIN_AREA` | `0.5` / `12` | Motion-gate sensitivity |
 | `TRACKER_MIN_TRACK_AGE` / `_MIN_TRAVEL_FRAC` | `1` / `0.02` | Crossing gate |
-| `TRACKER_CROSS_MARGIN_FRAC` | `0.015` | Hysteresis past the line (fraction of frame height) |
+| `TRACKER_CROSS_MARGIN_FRAC` | `0.06` | Hysteresis past the line (fraction of frame height) |
 | `TRACKER_IOU_GATE` | `0.2` | Min IoU with the velocity-predicted box to match a detection |
 | `TRACKER_ASSOC_FRAC` | `0.2` | Fallback centroid gate = fraction of frame width |
 | `TRACKER_ASSOC_GAP_FRAC` | `0.5` | Extra fallback gate per second of stream gap |

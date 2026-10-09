@@ -118,7 +118,9 @@ class Config:
         self.min_track_age = int(os.environ.get("TRACKER_MIN_TRACK_AGE", "1"))
         self.min_travel_frac = float(os.environ.get("TRACKER_MIN_TRAVEL_FRAC", "0.02"))
         # Hysteresis past the line (fraction of frame height) to reject jitter.
-        self.cross_margin_frac = float(os.environ.get("TRACKER_CROSS_MARGIN_FRAC", "0.015"))
+        # Wide enough that a stationary/working vehicle parked on the line (its
+        # bbox centroid wandering as the detector re-fits it) can't flip sides.
+        self.cross_margin_frac = float(os.environ.get("TRACKER_CROSS_MARGIN_FRAC", "0.06"))
         self.running = True
         self._reconnect = False
         self.captures = []
@@ -321,6 +323,7 @@ class CrossingGate:
         self.first = {}
         self.last_cross = {}
         self.side = {}        # tid -> last committed side (+1/-1) outside the band
+        self._pending = {}    # tid -> candidate side, committed only by `allow`
 
     def update_first(self, tid, cen):
         if tid not in self.first:
@@ -331,6 +334,7 @@ class CrossingGate:
             self.first.pop(tid, None)
             self.last_cross.pop(tid, None)
             self.side.pop(tid, None)
+            self._pending.pop(tid, None)
 
     def crossing(self, line, obj, flip=False, margin=0.0, seg_tol=0.02):
         """Stateful line-crossing test with hysteresis.
@@ -341,19 +345,33 @@ class CrossingGate:
         inside the drawn segment. Committing to a side means a low-confidence
         box whose centroid jitters across the line by a pixel or two never
         registers a crossing.
+
+        The flip is only a *candidate* here: `allow` commits it when the
+        flicker gate passes. Doing it this way (instead of flipping eagerly)
+        means a candidate that `allow` rejects leaves the track committed to
+        its old side, so the next micro-crossing cannot be counted in the
+        opposite direction — the bug that turned a parked/working vehicle on
+        the line into spurious IN/OUT events.
         """
         dist, t = line_geometry(line, obj.centroid)
-        if dist is None:
-            return CROSSING_NONE
-        if abs(dist) < margin:
+        if dist is None or abs(dist) < margin:
+            # Not a crossing. Inside the band is also "came back to the line",
+            # so any pending candidate is abandoned.
+            self._pending.pop(obj.track_id, None)
             return CROSSING_NONE
         new_side = 1 if dist >= 0 else -1
         prev = self.side.get(obj.track_id)
-        self.side[obj.track_id] = new_side
         if prev is None or prev == new_side:
+            self.side[obj.track_id] = new_side
+            self._pending.pop(obj.track_id, None)
             return CROSSING_NONE
         if t < -seg_tol or t > 1 + seg_tol:
+            # Crossed the infinite line, but outside the drawn segment: re-arm
+            # without counting.
+            self.side[obj.track_id] = new_side
+            self._pending.pop(obj.track_id, None)
             return CROSSING_NONE
+        self._pending[obj.track_id] = new_side
         if flip:
             return CROSSING_OUT if new_side == 1 else CROSSING_IN
         return CROSSING_IN if new_side == 1 else CROSSING_OUT
@@ -368,6 +386,10 @@ class CrossingGate:
         if now - self.last_cross.get(obj.track_id, 0.0) < self.cooldown:
             return False
         self.last_cross[obj.track_id] = now
+        # Accepted: commit the candidate side flip.
+        new_side = self._pending.pop(obj.track_id, None)
+        if new_side is not None:
+            self.side[obj.track_id] = new_side
         return True
 
 # ── Capture Manager ───────────────────────────────────────────────────

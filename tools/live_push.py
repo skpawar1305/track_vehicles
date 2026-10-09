@@ -271,7 +271,7 @@ def main():
             for obj in objects:
                 if not (line_px and obj.age >= 2):
                     continue
-                crossing = gate.crossing(line_px, obj, flip=flip, margin=0.015 * fh)
+                crossing = gate.crossing(line_px, obj, flip=flip, margin=0.06 * fh)
                 if debug:
                     print(f"[dbg] #{obj.track_id} {obj.label} cross={crossing} "
                           f"age={obj.age} side={gate.side.get(obj.track_id)}")
