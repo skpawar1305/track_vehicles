@@ -34,7 +34,7 @@ def env(name, default=None, required=False):
 def post_event(api_url, token, capture_dir, ev):
     img = os.path.join(capture_dir, ev["image_path"])
     if not os.path.isfile(img):
-        return False, "image missing", False
+        return False, "image missing", False, False
     data = {k: ("" if ev[k] is None else str(ev[k])) for k in EVENT_FIELDS}
     thumb = None
     if ev.get("thumb_path"):
@@ -58,17 +58,20 @@ def post_event(api_url, token, capture_dir, ev):
             try:
                 r = requests.post(api_url, data=data, files=files,
                                   headers={"Authorization": f"Bearer {token}"},
-                                  timeout=60)
+                                  timeout=(5, 60))
             finally:
                 if thumb:
                     th.close()
                 if sub:
                     sf.close()
         if r.ok:
-            return True, r.text[:200], True
-        return False, f"HTTP {r.status_code}: {r.text[:200]}", False
+            return True, r.text[:200], True, False
+        # 4xx is permanent until an operator fixes it (bad token, malformed
+        # event); 5xx/network are transient. Neither should drop the capture.
+        permanent = 400 <= r.status_code < 500
+        return False, f"HTTP {r.status_code}: {r.text[:200]}", False, permanent
     except requests.RequestException as e:
-        return False, str(e), False
+        return False, str(e), False, False
 
 
 def delete_local(capture_dir, ev):
@@ -85,7 +88,7 @@ def delete_local(capture_dir, ev):
 def pass_once(api_url, token, capture_dir, store):
     sent = 0
     for ev in store.pending(limit=100):
-        ok, msg, has_image = post_event(api_url, token, capture_dir, ev)
+        ok, msg, has_image, permanent = post_event(api_url, token, capture_dir, ev)
         if ok:
             store.mark_synced([ev["id"]])
             delete_local(capture_dir, ev)
@@ -95,8 +98,12 @@ def pass_once(api_url, token, capture_dir, store):
             store.mark_synced([ev["id"]])
             print(f"[sync] {ev['id']}: {msg}; marked done")
         else:
-            print(f"[sync] {ev['id']}: {msg}")
-            break  # likely offline; stop this pass
+            # Keep the row: offline is expected, and a permanent 4xx must be
+            # fixed by an operator (we never silently discard a capture).
+            store.record_failure(ev["id"], msg)
+            tag = "PERMANENT" if permanent else "offline"
+            print(f"[sync] {ev['id']}: {msg} [{tag}]; keeping row")
+            break  # don't hammer the server; retry next pass
     return sent
 
 
@@ -111,7 +118,11 @@ def main():
     store = Store(db_path)
     print(f"[sync] API {api_url} -> {capture_dir} (db {db_path})")
     while True:
-        sent = pass_once(api_url, token, capture_dir, store)
+        try:
+            sent = pass_once(api_url, token, capture_dir, store)
+        except Exception as e:
+            print(f"[sync] pass error: {e}", file=sys.stderr)
+            sent = 0
         if once:
             print(f"[sync] done, {sent} sent")
             return

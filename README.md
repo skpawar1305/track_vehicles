@@ -215,6 +215,34 @@ A browser shell into the Pi, carried entirely over the existing outbound channel
 | `bbox`, `line` | JSON arrays |
 | `image`, `thumb`, `sub` | JPEG files (raw frame, no overlay; `sub` = detection substream) |
 
+## Failure handling (best effort)
+
+Nothing on the edge is allowed to fail silently: a lost frame is free, a lost
+count or a dead worker is not. Invariants the code upholds:
+
+- **Background workers never die quietly.** The reader and the capture worker
+  each wrap their loop body in `try/except` and log + recover. A raise used to
+  kill the thread (a daemon) while `run.py` kept "running" and counting.
+- **A stalled stream reconnects itself.** If no genuinely-new frame arrives for
+  `TRACKER_READ_TIMEOUT` (default 15 s) the reader forces a reopen; `stimeout`
+  and `rw_timeout` bound a blocked `cap.read()`.
+- **In-memory counts and the DB never diverge.** If the capture queue is full,
+  the crossing is persisted inline from the substream frame instead of dropped.
+  A locked DB is retried (`busy_timeout` + a short retry) rather than fatal.
+- **Offline is expected; unsynced captures are never pruned.** `store.prune`
+  only deletes `synced=1` rows. The sync worker deletes local files only after a
+  `2xx`.
+- **A permanent upload error keeps the row.** `sync.py` classifies `4xx` as
+  permanent (bad token/malformed) and logs `PERMANENT …; keeping row`, recording
+  `sync_attempts`/`last_error` so the stuck event is visible. Only a genuine
+  `2xx` marks it synced.
+- **Ingest is atomic.** The VPS writes each uploaded image to a temp file and
+  renames it into place, so a crash mid-write can never leave a truncated JPEG
+  to be served.
+- **No silent `except: pass`.** Recurring errors from the config poll, live
+  relay, prune sweep and snapshot fetch are rate-limited (first hit, then once a
+  minute) so a wrong URL or a bad token is diagnosable.
+
 ## Models
 
 Build the production model (and optional faster/other sizes):

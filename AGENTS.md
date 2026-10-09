@@ -7,6 +7,26 @@
 - Follow the pareto principle: do the highest-value, lowest-effort work first.
 - Be concise; this project is run from a terminal.
 
+## Best-effort invariants
+Failures are expected; silent failures are bugs. Keep these true everywhere:
+- **Workers never die silently.** Every long-lived loop (`reader_loop`,
+  `capture_loop`, `sync.py main`, `config_loop`, `live_loop`, `prune_loop`) wraps
+  its body in `try/except` and logs + recovers. A raise in a daemon thread must
+  not stop counting while the process still looks alive.
+- **Counts == DB.** Never drop a crossing: if the capture queue is full, persist
+  it inline from the substream frame (`persist_capture(..., jpeg=None)`). A locked
+  DB is retried (`PRAGMA busy_timeout=5000` + `_safe_store_add`), not fatal.
+- **A stream stall self-heals.** `TRACKER_READ_TIMEOUT` (15 s) forces a reconnect
+  when no fresh frame arrives; `stimeout`/`rw_timeout` bound `cap.read()`.
+- **Offline never loses data.** `store.prune` deletes only `synced=1` rows; the
+  sync worker deletes local files only after a `2xx`.
+- **Permanent upload errors keep the row.** `sync.py` treats `4xx` as permanent,
+  logs it, and records `sync_attempts`/`last_error`; only `2xx` marks synced.
+- **Atomic ingest.** The VPS writes uploads to a temp file then renames, so a
+  crash can't leave a truncated JPEG at a served path.
+- **No `except: pass`.** Use `_log_throttled` (first hit, then once a minute) so
+  config/live/prune/snapshot failures are diagnosable.
+
 ## Project
 - Edge vehicle line-counter: RTSP -> detector (YOLO26n INT8 via ncnn) -> centroid
   tracker -> crossing gate -> offline SQLite -> HTTPS sync to a Bun/VPS dashboard.

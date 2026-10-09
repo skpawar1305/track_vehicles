@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync, unlinkSync } from "node:fs";
+import { mkdirSync, unlinkSync, renameSync } from "node:fs";
+import { resolve } from "node:path";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { eq, desc } from "drizzle-orm";
 import { events } from "./src/schema";
@@ -30,6 +31,10 @@ mkdirSync(`${CAPTURES_DIR}/thumb`, { recursive: true });
 mkdirSync(`${CAPTURES_DIR}/sub`, { recursive: true });
 
 const sqlite = new Database(DB_PATH, { create: true });
+// Ingest + hourly prune + config writes can overlap; wait for the writer
+// instead of throwing SQLITE_BUSY, and let readers run while a write commits.
+sqlite.exec("PRAGMA journal_mode=WAL");
+sqlite.exec("PRAGMA busy_timeout=5000");
 sqlite.exec(`
 CREATE TABLE IF NOT EXISTS events (
   id          TEXT PRIMARY KEY,
@@ -57,6 +62,12 @@ const eventCols = new Set(
 );
 if (!eventCols.has("sub_path")) sqlite.exec("ALTER TABLE events ADD COLUMN sub_path TEXT");
 const db = drizzle(sqlite);
+
+// Fail-open is intentional for local dev, but it is dangerous in production:
+// an unset token exposes /api/ingest and /api/live to anyone, and an unset
+// dashboard user exposes every page. Make it loud.
+if (!TOKEN) console.warn("[tracker-web] WARNING: TRACKER_TOKEN unset — machine API is unauthenticated");
+if (!DASH_USER) console.warn("[tracker-web] WARNING: DASH_USER unset — dashboard is unauthenticated");
 
 // ── Camera config (normalized 0..1 coords; set in dashboard, pulled by Pi) ──
 type CamConfig = {
@@ -107,6 +118,15 @@ const str = (v: FormDataEntryValue | null) => (v == null ? null : String(v));
 const esc = (s: unknown) =>
   String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+
+// Write upload bytes to a temp file then rename. A crash / disk-full mid-write
+// can then never leave a truncated JPEG at the path the dashboard serves.
+async function writeMediaAtomic(rel: string, file: File) {
+  const dest = `${CAPTURES_DIR}/${rel}`;
+  const tmp = `${dest}.tmp`;
+  await Bun.write(tmp, file);
+  renameSync(tmp, dest);
+}
 
 // ── Live frame relay (Pi POSTs /api/live; browsers read /live.mjpg) ──────
 let liveFrame: Uint8Array | null = null;
@@ -238,14 +258,26 @@ function unauthorized() {
 }
 
 async function serveImage(id: string, variant: "full" | "thumb" | "sub") {
-  const row = db.select().from(events).where(eq(events.id, id)).get();
-  const rel = variant === "thumb" ? row?.thumbPath
-            : variant === "sub" ? row?.subPath
-            : row?.imagePath;
-  if (!rel) return new Response("not found", { status: 404 });
-  const file = Bun.file(`${CAPTURES_DIR}/${rel}`);
-  if (!(await file.exists())) return new Response("not found", { status: 404 });
-  return new Response(file);
+  try {
+    const row = db.select().from(events).where(eq(events.id, id)).get();
+    const rel = variant === "thumb" ? row?.thumbPath
+              : variant === "sub" ? row?.subPath
+              : row?.imagePath;
+    if (!rel) return new Response("not found", { status: 404 });
+    const base = resolve(CAPTURES_DIR);
+    const full = resolve(base, rel);
+    // Defence in depth: never serve outside the captures dir even if the DB
+    // row is tampered with.
+    if (full !== base && !full.startsWith(base + "/")) {
+      return new Response("not found", { status: 404 });
+    }
+    const file = Bun.file(full);
+    if (!(await file.exists())) return new Response("not found", { status: 404 });
+    return new Response(file);
+  } catch (e) {
+    console.error("[tracker-web] serveImage failed", e);
+    return new Response("not found", { status: 404 });
+  }
 }
 
 type EventRow = {
@@ -788,36 +820,46 @@ Bun.serve({
     // Machine API — Bearer token
     if (url.pathname === "/api/ingest" && req.method === "POST") {
       if (!bearerOk(req)) return new Response("unauthorized", { status: 401 });
-      const form = await req.formData();
+      let form: FormData;
+      try {
+        form = await req.formData();
+      } catch {
+        return new Response("bad multipart body", { status: 400 });
+      }
       const id = String(form.get("id") ?? "");
       if (!id) return new Response("missing id", { status: 400 });
       const image = form.get("image");
       const thumb = form.get("thumb");
       const sub = form.get("sub");
-      const imagePath = image instanceof File ? `${id}.jpg` : "";
-      const thumbPath = thumb instanceof File ? `thumb/${id}.jpg` : "";
-      const subPath = sub instanceof File ? `sub/${id}.jpg` : null;
-      if (image instanceof File) await Bun.write(`${CAPTURES_DIR}/${imagePath}`, image);
-      if (thumb instanceof File) await Bun.write(`${CAPTURES_DIR}/${thumbPath}`, thumb);
-      if (sub instanceof File) await Bun.write(`${CAPTURES_DIR}/${subPath}`, sub);
-      db.insert(events)
-        .values({
-          id,
-          trackId: num(form.get("track_id")),
-          classId: num(form.get("class_id")),
-          label: str(form.get("label")),
-          confidence: num(form.get("confidence")),
-          direction: str(form.get("direction")),
-          crossedAt: str(form.get("crossed_at")),
-          bbox: str(form.get("bbox")),
-          line: str(form.get("line")),
-          imagePath,
-          thumbPath,
-          subPath,
-          createdAt: new Date().toISOString(),
-        })
-        .onConflictDoNothing()
-        .run();
+      const imagePath = image instanceof File && image.size > 0 ? `${id}.jpg` : "";
+      const thumbPath = thumb instanceof File && thumb.size > 0 ? `thumb/${id}.jpg` : "";
+      const subPath = sub instanceof File && sub.size > 0 ? `sub/${id}.jpg` : null;
+      try {
+        if (image instanceof File && image.size > 0) await writeMediaAtomic(imagePath, image);
+        if (thumb instanceof File && thumb.size > 0) await writeMediaAtomic(thumbPath, thumb);
+        if (sub instanceof File && sub.size > 0) await writeMediaAtomic(subPath!, sub);
+        db.insert(events)
+          .values({
+            id,
+            trackId: num(form.get("track_id")),
+            classId: num(form.get("class_id")),
+            label: str(form.get("label")),
+            confidence: num(form.get("confidence")),
+            direction: str(form.get("direction")),
+            crossedAt: str(form.get("crossed_at")),
+            bbox: str(form.get("bbox")),
+            line: str(form.get("line")),
+            imagePath,
+            thumbPath,
+            subPath,
+            createdAt: new Date().toISOString(),
+          })
+          .onConflictDoNothing()
+          .run();
+      } catch (e) {
+        console.error("[tracker-web] ingest failed", e);
+        return new Response(`ingest failed: ${(e as Error).message}`, { status: 500 });
+      }
       return Response.json({ ok: true, id });
     }
 

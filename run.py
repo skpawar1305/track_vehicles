@@ -27,7 +27,8 @@ def _enable_relay_capture_opts():
     if "protocol_whitelist" in opts:
         return
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-        opts + "|" if opts else "") + "protocol_whitelist;file,udp,rtp,rtsp,tcp"
+        opts + "|" if opts else "") + (
+        "protocol_whitelist;file,udp,rtp,rtsp,tcp|rw_timeout;15000000")
     os.environ["TRACKER_RELAY_REEXEC"] = "1"
     print("[relay] re-exec with FFmpeg options:", opts, flush=True)
     os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -40,6 +41,18 @@ import numpy as np
 import ncnn
 from store import Store
 from rtsp_relay import RtspRelay
+
+# Rate-limited logging for background workers: never let a recurring failure
+# either spam the journal every second or disappear silently.
+_throttle_last = {}
+
+
+def _log_throttled(key, msg, every=60.0):
+    now = time.time()
+    if now - _throttle_last.get(key, 0.0) >= every:
+        _throttle_last[key] = now
+        print(msg, flush=True)
+
 
 MODEL_DIR = Path(__file__).resolve().parent / "models"
 MODEL_PARAM = str(MODEL_DIR / "nanodet_plus_m_1.5x_416.ncnn.param")
@@ -1123,92 +1136,122 @@ def detect_loop(detector, cfg, latest, shared, stop):
 
 
 # ── Reader thread: RTSP capture with reconnect ────────────────────────
+# If the stream only hands back repeated/stale frames (or none) for this long,
+# force a reconnect: the NVR can stall silently while the process looks healthy.
+READ_TIMEOUT = float(os.environ.get("TRACKER_READ_TIMEOUT", "15"))
+
+
 def reader_loop(cfg, latest):
-    """Reads camera frames and stores the latest one for detect + tracking."""
+    """Reads camera frames and stores the latest one for detect + tracking.
+
+    Must never die: a raise here silently stops all counting while the process
+    stays up. Any unexpected error is logged and the stream is reopened.
+    """
     cap = None
     relay = None
     relay_url = None
     last_read_t = 0.0
     read_interval = 0.0
     prev_gray = None
+    last_fresh = time.time()
 
     while cfg.running:
-        if cap is not None and cfg.check_reconnect():
-            print("[reader] URL changed, reconnecting...")
-            cap.release(); cap = None
+        try:
+            if cap is not None and cfg.check_reconnect():
+                print("[reader] URL changed, reconnecting...")
+                cap.release(); cap = None
 
-        if cap is None:
-            url = cfg.stream_url
-            if not url:
-                time.sleep(1); continue
-            # Optional GStreamer pipeline (e.g. Pi hardware H.264 decode via
-            # v4l2h264dec) to move decode off the CPU that YOLO needs.
-            pipeline = os.environ.get("TRACKER_CAPTURE_PIPELINE", "")
-            if pipeline:
-                source, api = pipeline, cv2.CAP_GSTREAMER
-            elif cfg.relay:
-                # SHA-256 RTSP Digest camera: FFmpeg can't authenticate, so an
-                # RtspRelay terminates auth and re-serves RTP as a local SDP.
-                if relay is not None and relay_url != url:
-                    relay.stop(); relay = None
-                if relay is None:
-                    relay = RtspRelay(
-                        url,
-                        sdp_path=os.environ.get(
-                            "TRACKER_RELAY_SDP", "/tmp/tracker_rtsp_relay.sdp"),
-                        local_port=int(os.environ.get("TRACKER_RELAY_PORT", "5004")),
-                        auth=os.environ.get("TRACKER_RELAY_AUTH", "sha256"))
-                    relay_url = url
-                    relay.start()
-                if not relay.ready.wait(timeout=12):
-                    print("[reader] RTSP relay not ready, retrying in 5s...")
-                    relay.stop(); relay = None
-                    time.sleep(5); continue
-                opts = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "")
-                if "protocol_whitelist" not in opts:
-                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-                        opts + "|" if opts else "") + "protocol_whitelist;file,udp,rtp"
-                source, api = relay.sdp_path, cv2.CAP_FFMPEG
-            else:
-                source, api = url, cv2.CAP_FFMPEG
-            cap = cv2.VideoCapture(source, api)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # keep only the newest frame
-            if not cap.isOpened():
-                print("[reader] Failed to open stream, retrying in 5s...")
-                cap.release(); cap = None; time.sleep(5); continue
-            video_fps = cap.get(cv2.CAP_PROP_FPS)
-            read_interval = 1.0 / video_fps if video_fps > 0 else 0.0
+            # Stall watchdog: reconnect if no genuinely-new frame has arrived
+            # for too long (`stimeout`/`rw_timeout` bound a blocked read; this
+            # catches a stream that keeps returning the same stale frame).
+            if cap is not None and time.time() - last_fresh > READ_TIMEOUT:
+                print(f"[reader] no new frames for {READ_TIMEOUT:.0f}s, reconnecting...")
+                cap.release(); cap = None
+
+            if cap is None:
+                url = cfg.stream_url
+                if not url:
+                    time.sleep(1); continue
+                # Optional GStreamer pipeline (e.g. Pi hardware H.264 decode via
+                # v4l2h264dec) to move decode off the CPU that YOLO needs.
+                pipeline = os.environ.get("TRACKER_CAPTURE_PIPELINE", "")
+                if pipeline:
+                    source, api = pipeline, cv2.CAP_GSTREAMER
+                elif cfg.relay:
+                    # SHA-256 RTSP Digest camera: FFmpeg can't authenticate, so an
+                    # RtspRelay terminates auth and re-serves RTP as a local SDP.
+                    if relay is not None and relay_url != url:
+                        relay.stop(); relay = None
+                    if relay is None:
+                        relay = RtspRelay(
+                            url,
+                            sdp_path=os.environ.get(
+                                "TRACKER_RELAY_SDP", "/tmp/tracker_rtsp_relay.sdp"),
+                            local_port=int(os.environ.get("TRACKER_RELAY_PORT", "5004")),
+                            auth=os.environ.get("TRACKER_RELAY_AUTH", "sha256"))
+                        relay_url = url
+                        relay.start()
+                    if not relay.ready.wait(timeout=12):
+                        print("[reader] RTSP relay not ready, retrying in 5s...")
+                        relay.stop(); relay = None
+                        time.sleep(5); continue
+                    opts = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "")
+                    if "protocol_whitelist" not in opts:
+                        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                            opts + "|" if opts else "") + "protocol_whitelist;file,udp,rtp"
+                    source, api = relay.sdp_path, cv2.CAP_FFMPEG
+                else:
+                    source, api = url, cv2.CAP_FFMPEG
+                cap = cv2.VideoCapture(source, api)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # keep only the newest frame
+                if not cap.isOpened():
+                    print("[reader] Failed to open stream, retrying in 5s...")
+                    cap.release(); cap = None; time.sleep(5); continue
+                video_fps = cap.get(cv2.CAP_PROP_FPS)
+                read_interval = 1.0 / video_fps if video_fps > 0 else 0.0
+                last_read_t = time.time()
+                last_fresh = time.time()
+                if cfg.relay and not pipeline:
+                    print(f"[reader] Stream via RTSP relay ({video_fps:.2f} fps)")
+                else:
+                    print(f"[reader] Stream connected ({video_fps:.2f} fps)")
+
+            # Pace reads to match video's native framerate
+            if read_interval > 0:
+                elapsed = time.time() - last_read_t
+                if elapsed < read_interval:
+                    time.sleep(read_interval - elapsed)
+
+            ret, frame = cap.read()
             last_read_t = time.time()
-            if cfg.relay and not pipeline:
-                print(f"[reader] Stream via RTSP relay ({video_fps:.2f} fps)")
+            if not ret:
+                print("[reader] Stream lost, reconnecting...")
+                cap.release(); cap = None; time.sleep(1); continue
+
+            # Flag frames the NVR repeats while stalled. A repeated frame is
+            # bit-identical, so *no* pixels change; count significantly-changed pixels
+            # (rather than a mean) so even a small/distant mover still reads as fresh.
+            # Copy so the decoder can't overwrite the buffer a consumer still holds.
+            small = cv2.resize(frame, (320, 180), interpolation=cv2.INTER_AREA)
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            if prev_gray is None:
+                fresh = True
             else:
-                print(f"[reader] Stream connected ({video_fps:.2f} fps)")
-
-        # Pace reads to match video's native framerate
-        if read_interval > 0:
-            elapsed = time.time() - last_read_t
-            if elapsed < read_interval:
-                time.sleep(read_interval - elapsed)
-
-        ret, frame = cap.read()
-        last_read_t = time.time()
-        if not ret:
-            print("[reader] Stream lost, reconnecting...")
-            cap.release(); cap = None; time.sleep(1); continue
-
-        # Flag frames the NVR repeats while stalled. A repeated frame is
-        # bit-identical, so *no* pixels change; count significantly-changed pixels
-        # (rather than a mean) so even a small/distant mover still reads as fresh.
-        # Copy so the decoder can't overwrite the buffer a consumer still holds.
-        small = cv2.resize(frame, (320, 180), interpolation=cv2.INTER_AREA)
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        if prev_gray is None:
-            fresh = True
-        else:
-            changed = int((cv2.absdiff(gray, prev_gray) > 6).sum())
-            fresh = changed > 3
-        prev_gray = gray
-        latest.put(frame.copy(), fresh)
+                changed = int((cv2.absdiff(gray, prev_gray) > 6).sum())
+                fresh = changed > 3
+            prev_gray = gray
+            if fresh:
+                last_fresh = time.time()
+            latest.put(frame.copy(), fresh)
+        except Exception as e:
+            print(f"[reader] error: {e}; reconnecting...", flush=True)
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                cap = None
+            time.sleep(1)
 
     if cap is not None:
         cap.release()
@@ -1263,8 +1306,8 @@ def live_loop(url, token, live_q, cfg):
             continue
         try:
             requests.post(url, data=jpeg, headers=headers, timeout=10)
-        except Exception:
-            pass
+        except Exception as e:
+            _log_throttled("live", f"[live] post failed: {e}", every=60)
 
 def cam2_loop(cfg, live2_q, stop):
     """Relay camera 2's substream to the dashboard as raw JPEGs (no detection).
@@ -1363,8 +1406,8 @@ def fetch_capture_jpeg(cfg, timeout=6.0):
             verify=False, timeout=timeout)
         if r.ok and r.content and r.headers.get("content-type", "").startswith("image/"):
             return r.content
-    except Exception:
-        pass
+    except Exception as e:
+        _log_throttled("capture_fetch", f"[capture] snapshot fetch failed: {e}", every=60)
     return None
 
 
@@ -1374,6 +1417,53 @@ _CAPTURE_SESSION = None
 # stop trusting the fetch and fall back to the (accurately-timed) substream
 # frame for the full image as well.
 CAPTURE_MAX_AGE = float(os.environ.get("TRACKER_CAPTURE_MAX_AGE", "1.5"))
+
+
+def _safe_store_add(store, ev, tries=3):
+    """INSERT one event, retrying a briefly-locked DB. Never raises."""
+    for attempt in range(tries):
+        try:
+            store.add(ev)
+            return True
+        except Exception as e:
+            if "locked" in str(e).lower() and attempt < tries - 1:
+                time.sleep(0.5)
+                continue
+            print(f"[capture] store.add failed for {ev.get('id')}: {e}", flush=True)
+            return False
+    return False
+
+
+def persist_capture(cfg, capture_mgr, store, item, jpeg):
+    """Save the images + DB row for one crossing. Never raises.
+
+    The capture worker (and the inline overflow path in the track loop) must not
+    die on a disk-full / locked-DB / bad-value error: that would silently stop
+    every future crossing from being persisted while run.py keeps counting.
+    """
+    try:
+        entry = capture_mgr.store_crossing(
+            item["frame"], jpeg, item["track_id"], item["direction"],
+            item["crossed_at"])
+    except Exception as e:
+        print(f"[capture] save failed for ID#{item['track_id']}: {e}", flush=True)
+        return None
+    cfg.add_capture(entry)
+    _safe_store_add(store, {
+        "id": entry["filename"].rsplit(".", 1)[0],
+        "track_id": item["track_id"],
+        "class_id": item["class_id"],
+        "label": item["label"],
+        "confidence": item["confidence"],
+        "direction": entry["direction"],
+        "crossed_at": item["crossed_at"],
+        "bbox": item["bbox"],
+        "line": item["line"],
+        "image_path": entry["filename"],
+        "thumb_path": entry["thumb"],
+        "sub_path": entry["sub"],
+    })
+    return entry
 
 
 def capture_loop(cfg, capture_mgr, store, capture_q):
@@ -1390,36 +1480,18 @@ def capture_loop(cfg, capture_mgr, store, capture_q):
             item = capture_q.get(timeout=1.0)
         except Empty:
             continue
-        jpeg = None
-        age = time.time() - item.get("enqueued_at", time.time())
-        if age <= CAPTURE_MAX_AGE:
-            jpeg = fetch_capture_jpeg(cfg)
-        if jpeg is not None:
-            entry = capture_mgr.store_crossing(
-                item["frame"], jpeg, item["track_id"], item["direction"],
-                item["crossed_at"])
-            print(f"[capture] ID#{item['track_id']} main-stream ({len(jpeg) // 1024}KB)")
-        else:
-            entry = capture_mgr.store_crossing(
-                item["frame"], None, item["track_id"], item["direction"],
-                item["crossed_at"])
-            why = "stale" if age > CAPTURE_MAX_AGE else "fallback"
-            print(f"[capture] ID#{item['track_id']} substream ({why}, {age:.2f}s)")
-        cfg.add_capture(entry)
-        store.add({
-            "id": entry["filename"].rsplit(".", 1)[0],
-            "track_id": item["track_id"],
-            "class_id": item["class_id"],
-            "label": item["label"],
-            "confidence": item["confidence"],
-            "direction": entry["direction"],
-            "crossed_at": item["crossed_at"],
-            "bbox": item["bbox"],
-            "line": item["line"],
-            "image_path": entry["filename"],
-            "thumb_path": entry["thumb"],
-            "sub_path": entry["sub"],
-        })
+        try:
+            age = time.time() - item.get("enqueued_at", time.time())
+            jpeg = fetch_capture_jpeg(cfg) if age <= CAPTURE_MAX_AGE else None
+            if jpeg is not None:
+                print(f"[capture] ID#{item['track_id']} main-stream ({len(jpeg) // 1024}KB)")
+            else:
+                why = "stale" if age > CAPTURE_MAX_AGE else "fallback"
+                print(f"[capture] ID#{item['track_id']} substream ({why}, {age:.2f}s)")
+            persist_capture(cfg, capture_mgr, store, item, jpeg)
+        except Exception as e:
+            print(f"[capture] unexpected error for ID#{item.get('track_id')}: {e}",
+                  flush=True)
 
 
 def config_loop(cfg):
@@ -1437,8 +1509,8 @@ def config_loop(cfg):
                     cfg.apply_remote(data)
                     print(f"[config] applied remote config (line={cfg.norm_line}, roi={bool(cfg.norm_roi)}, "
                           f"flip={cfg.flip_sides})")
-        except Exception:
-            pass
+        except Exception as e:
+            _log_throttled("config", f"[config] poll failed: {e}", every=60)
         time.sleep(3)
 
 def prune_loop(store, capture_dir, retention_days):
@@ -1453,8 +1525,8 @@ def prune_loop(store, capture_dir, retention_days):
                     pass
             if paths:
                 print(f"[prune] expired {len(paths)} files older than {retention_days}d")
-        except Exception:
-            pass
+        except Exception as e:
+            _log_throttled("prune", f"[prune] error: {e}", every=60)
         time.sleep(3600)
 
 # ── Main: detect + track loop ─────────────────────────────────────────
@@ -1660,17 +1732,24 @@ def main():
                 last_cross_info[obj.track_id] = {'frame': total_frames, 'dir': crossing}
                 # Hand the capture to a worker: it fetches a full-res main-stream
                 # still (substream fallback) without stalling the track loop.
+                item = {
+                    "track_id": obj.track_id, "class_id": obj.class_id,
+                    "label": obj.label, "confidence": obj.confidence,
+                    "direction": crossing, "bbox": list(obj.bbox),
+                    "line": line_px, "frame": frame.copy(),
+                    "crossed_at": datetime.now(timezone.utc).isoformat(),
+                    "enqueued_at": time.time(),
+                }
                 try:
-                    capture_q.put_nowait({
-                        "track_id": obj.track_id, "class_id": obj.class_id,
-                        "label": obj.label, "confidence": obj.confidence,
-                        "direction": crossing, "bbox": list(obj.bbox),
-                        "line": line_px, "frame": frame.copy(),
-                        "crossed_at": datetime.now(timezone.utc).isoformat(),
-                        "enqueued_at": time.time(),
-                    })
+                    capture_q.put_nowait(item)
                 except Full:
-                    pass
+                    # Worker backlogged: persist inline from the substream frame
+                    # so the in-memory count and the DB can never diverge.
+                    _log_throttled(
+                        "capture_full",
+                        "[capture] queue full — persisting crossing inline (substream only)",
+                        every=30)
+                    persist_capture(cfg, capture_mgr, store, item, None)
                 if crossing == CROSSING_IN:
                     c_in += 1
                 else:

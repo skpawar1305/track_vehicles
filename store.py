@@ -17,6 +17,9 @@ class Store:
         self.lock = threading.Lock()
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
+        # The capture worker and the sync worker share this DB; wait briefly for
+        # the writer instead of raising "database is locked".
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
@@ -33,16 +36,23 @@ class Store:
                 thumb_path  TEXT,
                 sub_path    TEXT,
                 synced      INTEGER DEFAULT 0,
-                synced_at   TEXT
+                synced_at   TEXT,
+                sync_attempts INTEGER DEFAULT 0,
+                last_error  TEXT
             )
             """
         )
         self.conn.commit()
-        # Migration for DBs created before sub_path existed.
+        # Migrations for DBs created before these columns existed.
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(events)")}
-        if "sub_path" not in cols:
-            self.conn.execute("ALTER TABLE events ADD COLUMN sub_path TEXT")
-            self.conn.commit()
+        for col, ddl in (
+            ("sub_path", "ALTER TABLE events ADD COLUMN sub_path TEXT"),
+            ("sync_attempts", "ALTER TABLE events ADD COLUMN sync_attempts INTEGER DEFAULT 0"),
+            ("last_error", "ALTER TABLE events ADD COLUMN last_error TEXT"),
+        ):
+            if col not in cols:
+                self.conn.execute(ddl)
+                self.conn.commit()
 
     @staticmethod
     def _json_safe(v):
@@ -95,6 +105,16 @@ class Store:
             self.conn.executemany(
                 "UPDATE events SET synced=1, synced_at=? WHERE id=?",
                 [(now, i) for i in ids],
+            )
+            self.conn.commit()
+
+    def record_failure(self, event_id, msg):
+        """Note a failed upload attempt so a stuck event is visible (not lost)."""
+        with self.lock:
+            self.conn.execute(
+                "UPDATE events SET sync_attempts=COALESCE(sync_attempts,0)+1, "
+                "last_error=? WHERE id=?",
+                (str(msg)[:300], event_id),
             )
             self.conn.commit()
 
