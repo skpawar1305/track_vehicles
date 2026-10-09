@@ -83,8 +83,8 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   Ultralytics `agnostic_nms` equivalent. A crossing-level de-dupe safety net
   (same direction, IoU > `TRACKER_DUP_IOU`, within `TRACKER_CROSS_DEDUP_S`,
   default 1 s) guarantees one vehicle = one event. Do **not** try to fix this in
-  the centroid tracker, and do not switch to ByteTrack/BoT-SORT: they associate
-  by IoU and drop fast movers at the NVR's ~9 fps.
+  the centroid tracker: it is a detector problem. (ByteTrack/BoT-SORT are also
+  unattractive here — see the tracker notes below — but this bug is not the reason.)
 - **Offline is safe, but never prune unsynced rows.** `store.prune` deletes only
   `synced=1` events past `TRACKER_RETENTION_DAYS`; unsynced captures are the only
   copy while the VPS is unreachable and must be kept until `sync.py` gets a 2xx.
@@ -101,11 +101,22 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   month-hopping slow. The UI is a horizontal day-square strip (oldest→newest, today
   auto-scrolled in), `←`/`→` steps a day and never goes into the future; days with zero
   captures are still shown. `/calendar` 302-redirects to `/timeline`.
-- **Tracking at low fps: do not use IoU association.** At 10-20 fps a vehicle can move
-  farther than its own box between samples, so ByteTrack (IoU) returns nothing after the
-  first frame and fast movers are never counted. `run.py` uses a velocity-aware
-  *centroid* tracker (`CentroidTracker`) instead. The edge no longer needs `bytetracker`
-  (only the dev harnesses do).
+- **The substream is a genuine ~25 fps — verify it, don't assume.** Measured on the
+  current camera: `CAP_PROP_FPS` 25, PTS delta 40 ms/frame, ~25–29 frames/s delivered,
+  and **0% bit-identical consecutive frames** over 10 s. So the tracker advances on
+  essentially every frame; a "track fps" around 25 is correct and expected. An earlier
+  note here claimed ~9 genuinely-new fps on a bursty NVR — that was wrong (it inferred
+  duplicates from pixel changes on an idle scene, which says nothing about the encoder).
+  To tell a *duplicated* frame from a *static* one, use the container timestamp
+  (`CAP_PROP_POS_MSEC`), not pixel diffs; the reader's `fresh` flag is for the stall case
+  below, not normal operation.
+- **Do not use bare IoU association across stream stalls.** Frame-to-frame at ~25 fps,
+  IoU tracking is viable in principle. But the substream does stall for seconds; across
+  such a gap the vehicle moves far more than its own box, IoU is 0, and a ByteTrack-style
+  tracker drops the track exactly when a crossing can happen. `run.py` uses a
+  velocity-aware *centroid* tracker with wall-clock extrapolation so the track survives
+  the gap; that (plus no heavy deps) is the reason it is kept, not the base frame rate.
+  The edge does not need `bytetracker` (only the dev harnesses do).
 - **Crossing needs hysteresis, not a bare side-change.** A low-confidence box near
   the line jitters across it and registers false IN/OUT. `CrossingGate.crossing` commits each
   track to a side and requires the centroid to emerge >= `TRACKER_CROSS_MARGIN_FRAC` of the
@@ -134,10 +145,6 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   was written but *before* the event row — silently losing the crossing. ROI offsets are
   cast with `int()`, and `Store._json_safe` coerces any numpy value as a backstop. On the
   Pi, orphaned `captures/*.jpg` with no matching `events` row are the fingerprint.
-- The NVR substream is **bursty**: it repeats bit-identical frames (median changed-pixels
-  = 0) and only emits ~9 genuinely-new frames/s even when 20 fps is reported. This is why
-  the freeze/repeat handling matters — and why "track fps" (distinct frames processed) is
-  legitimately lower than the stream fps.
 - `ncnn`'s wheel declares the GUI `opencv-python` (needs libxcb); first-boot.sh replaces
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads

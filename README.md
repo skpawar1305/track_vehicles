@@ -1,8 +1,9 @@
 # Vehicle Line Counter
 
 RTSP vehicle counting with line-crossing detection. Inference is **YOLO26n INT8** via
-**ncnn** (ARM-optimised), tracking is a **low-fps centroid tracker**, the edge store is
-**offline-first SQLite**, and the dashboard is **Bun + Drizzle + SQLite** on a VPS.
+**ncnn** (ARM-optimised), tracking is a **velocity-aware centroid tracker** (gap-resilient,
+not IoU), the edge store is **offline-first SQLite**, and the dashboard is
+**Bun + Drizzle + SQLite** on a VPS.
 
 ```
 ┌──────────────── Pi 5 (DietPi, behind NAT) ─────────────────────────┐
@@ -42,14 +43,17 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
   A **heartbeat** (`TRACKER_MOTION_HEARTBEAT`, default 3 s) still runs YOLO periodically
   when idle, so a crossing can never be missed entirely.
 - **Decoupled tracking.** A dedicated thread runs detection as fast as the CPU allows while
-  the main loop tracks at the camera rate (10 fps). Between fresh detections the tracker is
-  fed an empty set and **coasts** the tracks forward (constant velocity), so the crossing
-  test samples at 10 fps even when YOLO runs at only 3-6 fps.
-- **Centroid tracking, not IoU.** At 10 fps a fast vehicle can move farther than its own box
-  between samples, so IoU association (ByteTrack) loses it — often returning nothing after
-  the first frame, which made fast bikes uncountable. Association is instead by *predicted
-  centroid distance* (`TRACKER_ASSOC_FRAC`), so the prev→cur centroid segment can still be
-  tested against the line. This suits sparse traffic; it is not built for dense crowds.
+  the main loop tracks at the camera rate (a genuine ~25 fps on the current camera). Between
+  fresh detections the tracker is fed an empty set and **coasts** the tracks forward
+  (constant velocity), so the crossing test samples at frame rate (YOLO is ~27 ms/frame
+  ≈ 37 fps on the Pi 5, so detection keeps up).
+- **Centroid tracking, not IoU.** Frame-to-frame at ~25 fps IoU association would work, but
+  the substream stalls for seconds at a time; across such a gap a fast vehicle moves far
+  more than its own box, IoU is 0, and a ByteTrack-style tracker loses it exactly when a
+  crossing can happen. Association is instead by *predicted centroid distance*
+  (`TRACKER_ASSOC_FRAC`) with wall-clock extrapolation, so the prev→cur centroid segment can
+  still be tested against the line across the gap. This suits sparse traffic; it is not
+  built for dense crowds.
 - **Crossing test (hysteresis).** Each track commits to a side of the line; a crossing
   counts only when the centroid emerges ≥ `TRACKER_CROSS_MARGIN_FRAC` of the frame height
   past the line on the other side, with its projection inside the drawn segment. This
@@ -309,8 +313,9 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
   class-agnostic NMS (`TRACKER_DUP_IOU`, default 0.6) merges them at the detector
   (the Ultralytics `agnostic_nms` equivalent), and a crossing-level de-dupe
   (`TRACKER_CROSS_DEDUP_S`, default 1 s) guarantees one event. Counting stays on a
-  velocity-aware centroid tracker, not ByteTrack/BoT-SORT, because IoU association
-  drops fast movers at the NVR's ~9 fps.
+  velocity-aware centroid tracker, not ByteTrack/BoT-SORT, because the substream
+  stalls for seconds and IoU association loses the vehicle across such a gap
+  (a genuine ~25 fps stream, but the gap is the problem, not the base frame rate).
 - **Offline-first, and unsynced rows are never pruned.** Events and images queue
   locally until `sync.py` gets a 2xx from the VPS, which is the only point a local
   file is deleted. `store.prune` only removes `synced=1` rows older than

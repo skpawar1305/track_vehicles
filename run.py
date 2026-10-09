@@ -889,7 +889,7 @@ def segment_crosses_line(line, old_centroid, new_centroid):
     o4 = side(ox, oy, nx, ny, bx, by)
     return (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0)
 
-# ── Centroid Tracker (low-fps safe) ───────────────────────────────────
+# ── Centroid Tracker (gap/stall resilient) ────────────────────────────
 class TrackInfo:
     """Lightweight tracked object wrapper for crossing detection & annotation."""
     __slots__ = ('track_id', 'bbox', 'label', 'class_id', 'confidence', 'centroid',
@@ -908,15 +908,17 @@ class TrackInfo:
 
 
 class CentroidTracker:
-    """Velocity-aware nearest-centroid tracker for low-fps streams.
+    """Velocity-aware nearest-centroid tracker, resilient to stream gaps.
 
-    The packaged BYTETracker associates boxes by IoU. On a 10 fps substream a
-    vehicle can move farther than its own box between two samples, so IoU is 0:
-    ByteTrack drops the track — often returning nothing for every frame after the
-    first — and the crossing age/travel gates can never be satisfied. This
-    associates by *predicted centroid distance* instead, so fast movers keep
-    their id and their prev->cur centroid segment can be tested against the line.
-    It is intentionally simple; it suits sparse scenes (a road, not a crowd).
+    The substream is a genuine ~25 fps, so frame-to-frame IoU association would
+    work in principle. But it stalls for seconds at a time; across such a gap the
+    vehicle moves far more than its own box, IoU is 0, and a ByteTrack-style
+    tracker drops the track — exactly when a crossing can happen — so the
+    crossing age/travel gates can never be satisfied. This associates by
+    *predicted centroid distance* with wall-clock extrapolation instead, so the
+    track keeps its id across the gap and its prev->cur centroid segment can be
+    tested against the line. Intentionally simple; suits sparse scenes (a road,
+    not a crowd).
     """
 
     def __init__(self, max_age=25, assoc_frac=0.2, vel_smooth=0.6,
@@ -1559,8 +1561,8 @@ def main():
         print(f"[main] Hybrid detector: motion-gated YOLO11 "
               f"({YOLO_PARAM.split('/')[-2]}, {NUM_THREADS} threads)")
 
-    # Low-FPS friendly: associate by predicted centroid distance, not IoU, so a
-    # fast vehicle that clears its own box between 10 fps samples keeps its id.
+    # Gap-resilient: associate by predicted centroid distance, not IoU, so a
+    # vehicle that moves far during a multi-second stream stall keeps its id.
     tracker     = CentroidTracker(
         max_age=int(os.environ.get("TRACKER_TRACK_MAX_AGE", "25")),
         assoc_frac=float(os.environ.get("TRACKER_ASSOC_FRAC", "0.2")),
