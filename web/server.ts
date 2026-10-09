@@ -334,10 +334,13 @@ main{max-width:920px;margin:0 auto;padding:14px}
 .feedtag .d{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(22,163,74,.25)}
 .sub{margin:12px 2px 0;color:var(--muted);font-size:12px;text-align:center}
 .calhead{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+#calToggle{transition:transform .15s}
+#calToggle.collapsed{transform:rotate(-90deg)}
 #calTitle{font-weight:800;font-size:16px;min-width:132px;text-align:center}
 .pill{border:1px solid var(--line);background:#fff;border-radius:999px;padding:9px 16px;cursor:pointer;font-weight:600;font-size:13px;transition:background .15s}
 .pill:hover{background:#f8fafc}
 .calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+.calgrid.off{display:none}
 .calgrid .dow{font-size:11px;font-weight:700;color:var(--muted);text-align:center;padding:2px 0;letter-spacing:.04em}
 .cell{min-height:58px;border:1px solid var(--line);border-radius:13px;background:var(--card);padding:6px 7px;display:flex;flex-direction:column;justify-content:space-between;cursor:pointer;transition:background .15s,box-shadow .15s;overflow:hidden}
 .cell:hover{box-shadow:var(--shadow)}
@@ -356,6 +359,8 @@ main{max-width:920px;margin:0 auto;padding:14px}
 .histhead .c{font-size:12px;color:var(--muted)}
 .histhead .pill{margin-left:auto}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px}
+.daysep{display:flex;align-items:center;gap:10px;margin:16px 0 10px;color:var(--muted);font-size:12px;font-weight:700}
+.daysep:before,.daysep:after{content:"";height:1px;background:var(--line);flex:1}
 .grp{margin-top:6px}
 .seg{display:inline-flex;background:#eef2f7;border:1px solid var(--line);border-radius:999px;padding:3px;gap:3px;margin:2px 0 12px}
 .seg button{border:0;background:transparent;border-radius:999px;padding:7px 15px;font-size:13px;font-weight:700;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:7px}
@@ -448,6 +453,7 @@ img{max-width:100%}
   </section>
   <section id="v-cal" class="view${view === "calendar" ? "" : " hidden"}">
     <div class="calhead">
+      <button class="icon" id="calToggle" title="Show / hide calendar">&#9662;</button>
       <button class="icon" id="prevMonth">&#8249;</button>
       <div id="calTitle"></div>
       <button class="icon" id="nextMonth">&#8250;</button>
@@ -549,6 +555,7 @@ function showTab(id){views.forEach(function(v){v.classList.toggle('hidden',v.id!
 showTab({live:'v-live',calendar:'v-cal',history:'v-hist'}[VIEW]||'v-live');
 var selDay=INIT;
 var dirFilter='in';
+var calOpen=true;
 var view=INIT?new Date(INIT+'T00:00:00'):new Date();
 function pad(n){return String(n).padStart(2,'0');}
 function ymd(y,m,d){return y+'-'+pad(m+1)+'-'+pad(d);}
@@ -559,7 +566,7 @@ function atOrAfterCurrentMonth(){var n=new Date();return view.getFullYear()>n.ge
   (view.getFullYear()===n.getFullYear()&&view.getMonth()>=n.getMonth());}
 function renderCal(){
   var y=view.getFullYear(),m=view.getMonth();
-  calTitle.textContent=view.toLocaleString(undefined,{month:'long',year:'numeric'});
+  calTitle.textContent=(!calOpen&&selDay)?dayLabel(selDay):view.toLocaleString(undefined,{month:'long',year:'numeric'});
   var today=todayKey();
   var h='';['Mo','Tu','We','Th','Fr','Sa','Su'].forEach(function(d){h+='<div class="dow">'+d+'</div>';});
   var start=(new Date(y,m,1).getDay()+6)%7,dim=new Date(y,m+1,0).getDate();
@@ -572,16 +579,21 @@ function renderCal(){
   calGrid.innerHTML=h;
   [].slice.call(calGrid.querySelectorAll('[data-day]')).forEach(function(el){
     // Stay on /calendar: reveal the day's captures inline instead of jumping to /history.
-    el.onclick=function(){selDay=el.dataset.day;renderCal();renderCalDay();};});
+    el.onclick=function(){selectDay(el.dataset.day);};});
   document.getElementById('nextMonth').disabled=atOrAfterCurrentMonth();
+  calGrid.classList.toggle('off',!calOpen);
+  document.getElementById('prevMonth').style.visibility=calOpen?'visible':'hidden';
+  document.getElementById('nextMonth').style.visibility=calOpen?'visible':'hidden';
+  document.getElementById('calToggle').classList.toggle('collapsed',!calOpen);
 }
-function selectDay(k){selDay=k;if(k)view=new Date(k+'T00:00:00');renderCal();renderHist();renderCalDay();}
+function selectDay(k){selDay=k;if(k)view=new Date(k+'T00:00:00');calOpen=!k;renderCal();renderHist();renderCalDay();}
 function shiftDay(n){var b=selDay?new Date(selDay+'T00:00:00'):new Date();b.setDate(b.getDate()+n);
   var k=ymd(b.getFullYear(),b.getMonth(),b.getDate());if(k>todayKey())return;
   selectDay(k);}
 document.getElementById('prevMonth').onclick=function(){view.setMonth(view.getMonth()-1);renderCal();};
 document.getElementById('nextMonth').onclick=function(){if(atOrAfterCurrentMonth())return;view.setMonth(view.getMonth()+1);renderCal();};
 document.getElementById('todayBtn').onclick=function(){selectDay(todayKey());};
+document.getElementById('calToggle').onclick=function(){calOpen=!calOpen;renderCal();};
 document.addEventListener('keydown',function(e){if(e.target&&/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;
   if(e.key==='ArrowLeft'){shiftDay(-1);e.preventDefault();}else if(e.key==='ArrowRight'){shiftDay(1);e.preventDefault();}});
 var hist=document.getElementById('hist'),histHead=document.getElementById('histHead');
@@ -591,6 +603,14 @@ function fmt(ts){try{return new Date(ts).toLocaleString('sv-SE',{timeZone:'Asia/
 // Hours dominate, minutes are secondary, seconds are dropped.
 function fmtTime(ts){var s=fmt(ts).slice(11,16);if(s.length<5)return '<b>'+s+'</b>';
   return '<b>'+s.slice(0,2)+'</b><span class="mm">'+s.slice(3,5)+'</span>';}
+// Human day label for the date separators / collapsed calendar.
+function dayLabel(k){
+  if(k===todayKey())return 'Today';
+  var y=new Date(Date.now()-86400000).toLocaleDateString('sv-SE',{timeZone:'Asia/Kolkata'});
+  if(k===y)return 'Yesterday';
+  try{return new Date(k+'T00:00:00').toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short',year:'numeric'});}
+  catch(e){return k;}
+}
 // Render a capture list into any (head, grid) pair. A day filters to one IST day.
 function renderList(day, headEl, gridEl){
   var list=day?EVENTS.filter(function(e){return istDay(e.ts)===day;}):EVENTS;
@@ -619,10 +639,23 @@ function renderList(day, headEl, gridEl){
   var items=dirFilter==='out'?outs:ins;
   gridEl.innerHTML='';
   var wrap=document.createElement('div');wrap.className='grp';wrap.appendChild(seg);
-  var gal=document.createElement('div');
-  if(items.length){gal.className='gallery';gal.innerHTML=items.map(card).join('');}
-  else{gal.className='empty2';gal.textContent='No '+dirFilter.toUpperCase()+' captures';}
-  wrap.appendChild(gal);gridEl.appendChild(wrap);
+  if(!items.length){
+    var em=document.createElement('div');em.className='empty2';
+    em.textContent='No '+dirFilter.toUpperCase()+' captures';wrap.appendChild(em);
+  } else if(day){
+    var g=document.createElement('div');g.className='gallery';
+    g.innerHTML=items.map(card).join('');wrap.appendChild(g);
+  } else {
+    // All recent: group by IST day, newest first (WhatsApp / Google-Photos style).
+    var byDay={},order=[];
+    items.forEach(function(e){var k=istDay(e.ts);if(!byDay[k]){byDay[k]=[];order.push(k);}byDay[k].push(e);});
+    order.forEach(function(k){
+      var sep=document.createElement('div');sep.className='daysep';
+      var lab=document.createElement('span');lab.textContent=dayLabel(k);sep.appendChild(lab);wrap.appendChild(sep);
+      var g=document.createElement('div');g.className='gallery';g.innerHTML=byDay[k].map(card).join('');wrap.appendChild(g);
+    });
+  }
+  gridEl.appendChild(wrap);
 }
 function renderHist(){renderList(selDay,histHead,hist);}
 function renderCalDay(){
