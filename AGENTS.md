@@ -39,6 +39,27 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   from a laptop, can push to the VPS) and `tools/test_clip.py` (runs the production
   tracker/crossing over a video file and reports IN/OUT).
 
+## Deploying to the edge (Pi)
+- The Pi has **no git** and `/opt/tracker` is **not a checkout**; the dashboard repo is
+  private, so `raw.githubusercontent.com`/the GitHub API 404 unauthenticated. Don't try
+  `git pull` or a raw fetch from the Pi.
+- Deploy over the reverse terminal (`https://tracker.drnanoinc.com/terminal`, HTTP Basic;
+  the browser drives the Pi's PTY via `term_agent.py`). It runs as the unprivileged
+  `tracker` user with `NoNewPrivileges`, so **`sudo` is blocked** — you can't edit
+  `/etc/tracker/*.env` or `systemctl restart` from there.
+- **Patch over the terminal**: build the change locally, then generate a patch script from
+  the exact `git diff` old→new block, and *verify locally* that applying it to the previous
+  blob reproduces the target file's `sha256sum`. Base64 the script, write it to the Pi in
+  `printf` chunks, apply it to `/opt/tracker/run.py`, and confirm the file's sha256 matches
+  the commit. Read runtime settings from `/opt/tracker/config.json` and
+  `/etc/tracker/tracker.env`.
+- **Restart**: `kill "$(pgrep -f '[r]un.py')"`; `tracker.service` is `Restart=always` and
+  comes back in ~5 s with the new code (counts live in SQLite, so nothing is lost). Verify
+  with `ps -o pid,lstart,cmd -p "$(pgrep -f '[r]un.py')"`. The service's journal isn't
+  readable by `tracker` (not in `systemd-journal`); use the dashboard/DB instead.
+- Event rows (incl. `confidence`, `bbox`) live on the Pi at `/var/lib/tracker/events.db`
+  and on the VPS; the VPS API doesn't expose them, so query the Pi's SQLite for detail.
+
 ## Hard-won gotchas
 - Never disable PyTorch warnings or lower ncnn log level to silence issues; fix them.
 - ncnn: keep the input `Mat` alive until after `extractor.extract()` (an inline
