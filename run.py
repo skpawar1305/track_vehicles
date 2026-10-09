@@ -1,4 +1,4 @@
-import json, threading, time, os, sys
+import json, threading, time, os, sys, signal
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Queue, Empty, Full
@@ -52,6 +52,58 @@ def _log_throttled(key, msg, every=60.0):
     if now - _throttle_last.get(key, 0.0) >= every:
         _throttle_last[key] = now
         print(msg, flush=True)
+
+
+# ── Worker liveness ───────────────────────────────────────────────────
+# Every long-lived loop stamps its name here each iteration. A thread that
+# *raises* is already guarded inside its loop; this catches the other failure
+# mode — a thread wedged on a lock or a stuck C call — which otherwise leaves
+# the process alive but no longer counting.
+_HEARTBEAT = {}
+
+
+def _beat(name):
+    _HEARTBEAT[name] = time.time()
+
+
+# Staleness budget per worker (seconds). Must exceed the worker's own longest
+# idle wait plus its slowest single step, or it is a false positive.
+WORKER_TIMEOUTS = {
+    "reader": 60.0, "detect": 60.0, "capture": 60.0, "config": 60.0,
+    "live": 60.0, "cam2": 60.0, "prune": 7200.0,
+}
+# These three are on the counting path: a stall means crossings may be missed,
+# so the supervisor forces a (draining) restart rather than just logging.
+CRITICAL_WORKERS = {"reader", "detect", "capture"}
+
+
+def supervisor_loop(cfg, stop):
+    """Force a draining restart if a counting worker wedges.
+
+    Setting ``cfg.running=False`` lets the main loop exit and drain the capture
+    queue first; systemd ``Restart=always`` then brings us back with fresh
+    threads. Without this, a deadlock in one worker leaves the process looking
+    healthy while counts silently stop.
+    """
+    while cfg.running and not stop.is_set():
+        now = time.time()
+        for name, budget in WORKER_TIMEOUTS.items():
+            last = _HEARTBEAT.get(name)
+            if last is None:
+                continue
+            age = now - last
+            if age <= budget:
+                continue
+            if name in CRITICAL_WORKERS:
+                print(f"[supervisor] critical worker '{name}' stalled {age:.0f}s; "
+                      f"restarting", flush=True)
+                cfg.running = False
+                stop.set()
+                return
+            _log_throttled(f"hb_{name}",
+                           f"[supervisor] worker '{name}' stalled {age:.0f}s",
+                           every=60)
+        stop.wait(10)
 
 
 MODEL_DIR = Path(__file__).resolve().parent / "models"
@@ -1145,33 +1197,39 @@ def detect_loop(detector, cfg, latest, shared, stop):
     """
     last = -1
     while not stop.is_set():
-        frame, seq, fresh = latest.get()
-        if frame is None or seq == last:
-            time.sleep(0.005)
-            continue
-        last = seq
-        if not fresh:                        # NVR repeat; don't burn CPU on it
-            continue
-        if float(frame.std()) <= 5:          # warm-up / dead frames
-            continue
-        h, w = frame.shape[:2]
-        roi_px = cfg.pixel_roi(w, h)
-        # Read the class filter every frame so a remote config change applies live.
-        classes = None if cfg.detector == "motion" else cfg.enabled_classes
+        _beat("detect")
+        # The whole body is guarded: an unhandled raise here would silently stop
+        # all detection while the process (and every other thread) looks healthy.
         try:
+            frame, seq, fresh = latest.get()
+            if frame is None or seq == last:
+                time.sleep(0.005)
+                continue
+            last = seq
+            if not fresh:                    # NVR repeat; don't burn CPU on it
+                continue
+            if float(frame.std()) <= 5:      # warm-up / dead frames
+                continue
+            h, w = frame.shape[:2]
+            roi_px = cfg.pixel_roi(w, h)
+            # Read the class filter every frame so a remote config applies live.
+            classes = None if cfg.detector == "motion" else cfg.enabled_classes
             if roi_px and len(roi_px) >= 3:
                 dets = detector.detect_roi(frame, roi_px, enabled_classes=classes)
             else:
                 dets = detector.detect(frame, enabled_classes=classes)
+            if len(dets) > MAX_DETECTIONS_PER_FRAME:
+                _log_throttled("detect_glitch",
+                               f"[detect] implausible detections ({len(dets)}) "
+                               f"— glitch, ignoring", every=30)
+                dets = []
+            with shared["lock"]:
+                shared["dets"] = dets
+                shared["counter"] += 1
         except Exception as e:
-            print("[detect] error:", e)
-            continue
-        if len(dets) > MAX_DETECTIONS_PER_FRAME:
-            print(f"[detect] implausible detections ({len(dets)}) — glitch, ignoring")
-            dets = []
-        with shared["lock"]:
-            shared["dets"] = dets
-            shared["counter"] += 1
+            _log_throttled("detect_err", f"[detect] error: {e}", every=30)
+            time.sleep(0.1)
+    print("[detect] Done")
 
 
 # ── Reader thread: RTSP capture with reconnect ────────────────────────
@@ -1196,6 +1254,7 @@ def reader_loop(cfg, latest):
     last_pos = -1.0
 
     while cfg.running:
+        _beat("reader")
         try:
             if cap is not None and cfg.check_reconnect():
                 print("[reader] URL changed, reconnecting...")
@@ -1349,6 +1408,7 @@ def live_loop(url, token, live_q, cfg):
     import requests
     headers = {"Authorization": f"Bearer {token}"}
     while cfg.running:
+        _beat("live")
         try:
             jpeg = live_q.get(timeout=1.0)
         except Empty:
@@ -1371,6 +1431,7 @@ def cam2_loop(cfg, live2_q, stop):
     idle_since = None
     last_live = 0.0
     while not stop.is_set():
+        _beat("cam2")
         if not cfg.live2_wanted:
             # Drop the session after a short grace so brief reconnects don't flap.
             if cap is not None:
@@ -1524,14 +1585,21 @@ def capture_loop(cfg, capture_mgr, store, capture_q):
     unavailable, the substream frame is used for the full image too — an
     accurately-timed low-res frame beats a crisp frame of the wrong moment.
     """
-    while cfg.running:
+    # Drain on shutdown too: `cfg.running` goes False before the main loop
+    # exits, but anything already counted and queued must still be persisted so
+    # the DB can never fall behind the counts.
+    while cfg.running or not capture_q.empty():
+        _beat("capture")
         try:
             item = capture_q.get(timeout=1.0)
         except Empty:
             continue
         try:
             age = time.time() - item.get("enqueued_at", time.time())
-            jpeg = fetch_capture_jpeg(cfg) if age <= CAPTURE_MAX_AGE else None
+            # During shutdown, skip the network still (it only delays the drain)
+            # and persist from the substream frame we already hold.
+            jpeg = (fetch_capture_jpeg(cfg)
+                    if cfg.running and age <= CAPTURE_MAX_AGE else None)
             if jpeg is not None:
                 print(f"[capture] ID#{item['track_id']} main-stream ({len(jpeg) // 1024}KB)")
             else:
@@ -1548,6 +1616,7 @@ def config_loop(cfg):
     import requests
     headers = {"Authorization": f"Bearer {cfg.token}"}
     while cfg.running:
+        _beat("config")
         try:
             r = requests.get(cfg.config_url, headers=headers, timeout=5)
             if r.ok:
@@ -1565,6 +1634,7 @@ def config_loop(cfg):
 def prune_loop(store, capture_dir, retention_days):
     """Hourly sweep: delete local events/captures older than retention_days."""
     while cfg.running:
+        _beat("prune")
         try:
             paths = store.prune(retention_days)
             for rel in paths:
@@ -1627,7 +1697,11 @@ def main():
     shared = {"dets": [], "counter": 0, "lock": threading.Lock()}
     stop = threading.Event()
 
+    # Seed each heartbeat at start so a worker that dies before its first beat
+    # is still caught by the supervisor after its budget.
+    _HEARTBEAT["reader"] = time.time()
     threading.Thread(target=reader_loop, args=(cfg, latest), daemon=True).start()
+    _HEARTBEAT["detect"] = time.time()
     threading.Thread(target=detect_loop,
                      args=(detector, cfg, latest, shared, stop), daemon=True).start()
     print("[main] Reader + detect threads started")
@@ -1635,8 +1709,10 @@ def main():
     # Full-res evidence: a worker fetches the camera's main-stream still at each
     # crossing (substream fallback) so a network fetch never stalls tracking.
     capture_q = Queue(maxsize=64)
-    threading.Thread(target=capture_loop, args=(cfg, capture_mgr, store, capture_q),
-                     daemon=True).start()
+    _HEARTBEAT["capture"] = time.time()
+    capture_thread = threading.Thread(
+        target=capture_loop, args=(cfg, capture_mgr, store, capture_q), daemon=True)
+    capture_thread.start()
     print("[main] Capture worker started")
 
     # Live relay to the VPS dashboard (optional; outbound POST)
@@ -1644,6 +1720,7 @@ def main():
     live_token = os.environ.get("TRACKER_TOKEN", "")
     live_q     = Queue(maxsize=1)
     if live_url:
+        _HEARTBEAT["live"] = time.time()
         threading.Thread(target=live_loop, args=(live_url, live_token, live_q, cfg),
                          daemon=True).start()
         print(f"[main] Live relay -> {live_url}")
@@ -1651,21 +1728,30 @@ def main():
     # Second camera (raw substream) — only streams while someone watches /live.
     live2_q = Queue(maxsize=1)
     if cfg.cam2_url and cfg.live2_url:
+        _HEARTBEAT["live"] = time.time()
         threading.Thread(target=live_loop, args=(cfg.live2_url, live_token, live2_q, cfg),
                          daemon=True).start()
+        _HEARTBEAT["cam2"] = time.time()
         threading.Thread(target=cam2_loop, args=(cfg, live2_q, stop), daemon=True).start()
         print(f"[main] Camera 2 live -> {cfg.live2_url}")
 
     # Pull line / scan-area config from the server (Pi is outbound-only)
     if cfg.config_url:
+        _HEARTBEAT["config"] = time.time()
         threading.Thread(target=config_loop, args=(cfg,), daemon=True).start()
         print(f"[main] Config poll -> {cfg.config_url}")
 
     # Auto-expire local events/captures older than the retention window
     retention_days = int(os.environ.get("TRACKER_RETENTION_DAYS", "30"))
+    _HEARTBEAT["prune"] = time.time()
     threading.Thread(target=prune_loop, args=(store, cfg.capture_dir, retention_days),
                      daemon=True).start()
     print(f"[main] Retention: {retention_days} days")
+
+    # Worker watchdog: any counting worker that wedges triggers a draining exit
+    # and systemd restarts us (a raise is already handled inside each loop).
+    threading.Thread(target=supervisor_loop, args=(cfg, stop), daemon=True).start()
+    print("[main] Supervisor started")
 
     _counts = store.total_counts()
     c_in  = _counts.get("in", 0)
@@ -1679,6 +1765,17 @@ def main():
     stat_dets = 0
     objects = []          # carried across stalled (repeated) frames for the live feed
     prev_frame_t = 0.0
+
+    # systemd stops/starts us with SIGTERM; handle it (and SIGINT) so the loop
+    # exits through the finally below and drains the capture queue instead of
+    # dropping already-counted crossings on every restart.
+    def _shutdown(signum, _frame):
+        print(f"[main] signal {signum}: graceful shutdown", flush=True)
+        cfg.running = False
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
 
     try:
         while cfg.running:
@@ -1720,7 +1817,13 @@ def main():
                 for obj in objects:
                     present.add(obj.track_id)
                     cross_gate.update_first(obj.track_id, obj.centroid)
-                cross_gate.drop(gate_ids - present)
+                # Track ids are never reused, so drop per-id state for tracks the
+                # tracker just retired — otherwise last_cross_info grows without
+                # bound for the life of the process (a slow leak over months).
+                dead = gate_ids - present
+                cross_gate.drop(dead)
+                for tid in dead:
+                    last_cross_info.pop(tid, None)
                 gate_ids = present
 
             # Push annotated frame to the VPS live feed (~5 fps, non-blocking).
@@ -1819,6 +1922,13 @@ def main():
         import traceback; traceback.print_exc()
     finally:
         cfg.running = False
+        stop.set()
+        # Let the capture worker persist everything already counted and queued
+        # before the process ends (counts==DB across restarts/updates).
+        try:
+            capture_thread.join(timeout=30)
+        except Exception:
+            pass
         print("[main] Done")
 
 if __name__ == "__main__":

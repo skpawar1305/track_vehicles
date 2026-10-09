@@ -10,12 +10,26 @@
 ## Best-effort invariants
 Failures are expected; silent failures are bugs. Keep these true everywhere:
 - **Workers never die silently.** Every long-lived loop (`reader_loop`,
-  `capture_loop`, `sync.py main`, `config_loop`, `live_loop`, `prune_loop`) wraps
-  its body in `try/except` and logs + recovers. A raise in a daemon thread must
-  not stop counting while the process still looks alive.
+  `detect_loop`, `capture_loop`, `sync.py main`, `config_loop`, `live_loop`,
+  `cam2_loop`, `prune_loop`) wraps its *whole* body in `try/except` and logs +
+  recovers — not just the risky call. A raise in a daemon thread must not stop
+  counting while the process still looks alive.
+- **A wedged worker is caught, not just logged.** Each loop stamps `_beat(name)`
+  every iteration; `supervisor_loop` forces a draining restart if a
+  counting-path worker (`reader`/`detect`/`capture`) stops heartbeating past its
+  budget (60 s). `WORKER_TIMEOUTS` must stay above each loop's longest idle wait
+  or it false-positives. `cfg.running=False` + `stop.set()` exits through the
+  main `finally`, which drains `capture_q` first, then systemd restarts us.
 - **Counts == DB.** Never drop a crossing: if the capture queue is full, persist
   it inline from the substream frame (`persist_capture(..., jpeg=None)`). A locked
   DB is retried (`PRAGMA busy_timeout=5000` + `_safe_store_add`), not fatal.
+- **Restarts drain the queue.** `SIGTERM`/`SIGINT` set `cfg.running=False` and
+  `stop`, so `capture_loop` (`while cfg.running or not capture_q.empty()`) still
+  persists everything already counted before exit. Skipping the network still
+  during drain keeps it fast. Handle the signal, or `finally` never runs.
+- **No unbounded per-id state.** Track ids are never reused, so anything keyed by
+  `track_id` (`last_cross_info`, `CrossingGate.*`) must be dropped when the
+  tracker retires the id (`dead = gate_ids - present`), or it leaks for months.
 - **A stream stall self-heals.** `TRACKER_READ_TIMEOUT` (15 s) forces a reconnect
   when no fresh frame arrives; an advancing container timestamp counts as alive,
   so a static scene is not treated as a stall. `stimeout`/`rw_timeout` bound
