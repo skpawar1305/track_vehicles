@@ -287,7 +287,7 @@ function dashboard(view: "live" | "calendar" | "history", initialDay: string | n
   const init = initialDay && /^\d{4}-\d{2}-\d{2}$/.test(initialDay) ? initialDay : null;
   const J = (o: unknown) => JSON.stringify(o).replace(/</g, "\\u003c");
   const cam2Panel = CAM2
-    ? `<div class="player" id="cam2" style="margin-top:12px"><img id="snap_cam2" alt="camera 2"></div>`
+    ? `<div class="feed" id="cam2"><div class="feedtag"><span class="d"></span>Camera 2</div><div class="player"><img id="snap_cam2" alt="camera 2"></div></div>`
     : "";
 
   return `<!doctype html><html lang="en"><head>
@@ -296,77 +296,139 @@ function dashboard(view: "live" | "calendar" | "history", initialDay: string | n
 <meta name="theme-color" content="#ffffff">
 <title>Vehicle Tracker</title>
 <style>
-:root{--bg:#f4f5f7;--card:#fff;--line:#e6e8ec;--text:#111827;--muted:#6b7280;--green:#16a34a;--red:#dc2626;--blue:#2563eb}
+:root{--bg:#f4f6fb;--card:#fff;--line:#e7eaf0;--text:#0f172a;--muted:#64748b;--green:#16a34a;--red:#dc2626;--blue:#2563eb;
+  --shadow:0 1px 2px rgba(15,23,42,.05),0 4px 12px rgba(15,23,42,.04)}
 *{box-sizing:border-box}
 body{margin:0;font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);
-  padding-bottom:calc(64px + env(safe-area-inset-bottom));-webkit-text-size-adjust:100%}
+  padding-bottom:calc(76px + env(safe-area-inset-bottom));-webkit-text-size-adjust:100%}
 button{font:inherit;color:inherit}
 a{color:var(--blue);text-decoration:none}
-header{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.94);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
-.bar{display:flex;align-items:center;gap:10px;padding:10px 14px 4px}
-.title{font-weight:700;font-size:16px}
-.live{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
-.dot{width:8px;height:8px;border-radius:50%;background:#9ca3af}
-.dot.on{background:var(--green)}
-.icon{width:42px;height:42px;border:1px solid var(--line);background:#fff;border-radius:12px;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer}
-.todaylbl{padding:2px 15px 0;font-size:12px;font-weight:700;color:var(--muted);letter-spacing:.02em}
-.stats{display:flex;gap:10px;padding:6px 14px 12px}
-.stat{flex:1;background:#fbfcfe;border:1px solid var(--line);border-radius:14px;padding:10px 12px;display:flex;align-items:baseline}
-.stat .lbl{font-size:12px;font-weight:700;letter-spacing:.06em}
-.stat .num{margin-left:auto;font-size:26px;font-weight:800;font-variant-numeric:tabular-nums}
+header{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.88);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+.bar{display:flex;align-items:center;gap:11px;padding:12px 16px 2px}
+.brand{display:flex;align-items:center;gap:11px;min-width:0}
+.logo{width:32px;height:32px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#22d3ee);display:flex;align-items:center;justify-content:center;color:#fff;flex:0 0 auto;box-shadow:0 4px 10px rgba(37,99,235,.28)}
+.title{font-weight:800;font-size:16px;letter-spacing:-.01em;line-height:1.1}
+.subt{font-size:11px;color:var(--muted);margin-top:2px}
+.live{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--muted);background:#f1f5f9;border:1px solid var(--line);border-radius:999px;padding:6px 11px;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:#cbd5e1}
+.dot.on{background:var(--green);box-shadow:0 0 0 4px rgba(22,163,74,.14)}
+.icon{width:40px;height:40px;border:1px solid var(--line);background:#fff;border-radius:12px;font-size:17px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s}
+.icon:hover{background:#f8fafc}
+.icon:disabled{opacity:.35;cursor:default}
+.todaylbl{padding:7px 16px 0;font-size:12px;font-weight:600;color:var(--muted)}
+.stats{display:flex;gap:12px;padding:8px 16px 14px}
+.stat{flex:1;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 15px;display:flex;align-items:center;box-shadow:var(--shadow)}
+.stat .lbl{font-size:12px;font-weight:800;letter-spacing:.09em;display:flex;align-items:center;gap:8px}
+.stat .lbl::before{content:"";width:9px;height:9px;border-radius:3px;background:currentColor;opacity:.85}
+.stat .num{margin-left:auto;font-size:30px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
 .stat.in .lbl,.stat.in .num{color:var(--green)}
 .stat.out .lbl,.stat.out .num{color:var(--red)}
-main{max-width:860px;margin:0 auto;padding:12px}
+main{max-width:920px;margin:0 auto;padding:14px}
 .view.hidden{display:none}
-.player{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:16px;overflow:hidden}
+.feeds{display:grid;grid-template-columns:1fr;gap:14px}
+@media(min-width:760px){.feeds{grid-template-columns:1fr 1fr}}
+.feed{position:relative}
+.player{position:relative;width:100%;aspect-ratio:16/9;background:#0b1220;border-radius:16px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow)}
 .player img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:translateZ(0)}
-.sub{margin:8px 2px 0;color:var(--muted);font-size:12px;text-align:center}
-.calhead{display:flex;align-items:center;gap:8px;margin-bottom:10px}
-#calTitle{font-weight:700;font-size:16px}
-.pill{border:1px solid var(--line);background:#fff;border-radius:999px;padding:9px 16px;cursor:pointer}
-.calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
-.calgrid .dow{font-size:11px;color:var(--muted);text-align:center;padding:2px 0}
-.cell{min-height:54px;border:1px solid var(--line);border-radius:12px;background:#fff;padding:5px 6px;display:flex;flex-direction:column;justify-content:space-between;cursor:pointer}
-.cell.empty{border:none;background:transparent;cursor:default}
-.cell.today{border-color:var(--blue)}
-.cell.sel{background:#dbeafe;border-color:var(--blue)}
-.cell .n{font-size:12px;font-weight:700}
-.cell.future{opacity:.35;cursor:default}
-.cell .c{font-size:11px;line-height:1.1;display:flex;gap:8px}
-.cell .ci{color:var(--green);font-weight:800}
-.cell .co{color:var(--red);font-weight:800}
-.icon:disabled{opacity:.35;cursor:default}
+.feedtag{position:absolute;left:10px;top:10px;z-index:2;font-size:11px;font-weight:700;color:#fff;background:rgba(15,23,42,.6);backdrop-filter:blur(4px);padding:5px 10px;border-radius:999px;display:flex;align-items:center;gap:6px;pointer-events:none}
+.feedtag .d{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(22,163,74,.25)}
+.sub{margin:12px 2px 0;color:var(--muted);font-size:12px;text-align:center}
+.calhead{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+#calTitle{font-weight:800;font-size:16px;min-width:132px;text-align:center}
+.pill{border:1px solid var(--line);background:#fff;border-radius:999px;padding:9px 16px;cursor:pointer;font-weight:600;font-size:13px;transition:background .15s}
+.pill:hover{background:#f8fafc}
+.calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+.calgrid .dow{font-size:11px;font-weight:700;color:var(--muted);text-align:center;padding:2px 0;letter-spacing:.04em}
+.cell{min-height:58px;border:1px solid var(--line);border-radius:13px;background:var(--card);padding:6px 7px;display:flex;flex-direction:column;justify-content:space-between;cursor:pointer;transition:background .15s,box-shadow .15s;overflow:hidden}
+.cell:hover{box-shadow:var(--shadow)}
+.cell.empty{border:none;background:transparent;cursor:default;box-shadow:none}
+.cell.today{border-color:var(--blue);background:#eff6ff}
+.cell.sel{background:#dbeafe;border-color:var(--blue);box-shadow:0 0 0 2px rgba(37,99,235,.25)}
+.cell.future{opacity:.32;cursor:default}
+.cell .n{font-size:12px;font-weight:700;color:var(--muted)}
+.cell.today .n,.cell.sel .n{color:var(--blue)}
+.cell .c{display:flex;flex-direction:column;gap:2px;align-items:flex-start}
+.cell .badge{font-size:10px;font-weight:800;font-variant-numeric:tabular-nums;border-radius:6px;padding:0 5px;line-height:1.5;max-width:100%}
+.cell .ci{color:var(--green);background:rgba(22,163,74,.1)}
+.cell .co{color:var(--red);background:rgba(220,38,38,.1)}
 .histhead{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
-.histhead .d{font-weight:700}
+.histhead .d{font-weight:800;font-size:16px}
 .histhead .c{font-size:12px;color:var(--muted)}
 .histhead .pill{margin-left:auto}
-.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
-figure{margin:0;background:#fff;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px}
+.grp{margin-top:6px}
+.seg{display:inline-flex;background:#eef2f7;border:1px solid var(--line);border-radius:999px;padding:3px;gap:3px;margin:2px 0 12px}
+.seg button{border:0;background:transparent;border-radius:999px;padding:7px 15px;font-size:13px;font-weight:700;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:7px}
+.seg button .n{font-size:11px;font-weight:800;background:rgba(15,23,42,.07);border-radius:999px;padding:0 7px;color:var(--muted)}
+.seg button.on{background:#fff;color:var(--text);box-shadow:var(--shadow)}
+.seg button.in.on{color:var(--green)}
+.seg button.out.on{color:var(--red)}
+figure{margin:0;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow);transition:transform .15s,box-shadow .15s}
+figure:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(15,23,42,.1)}
+figure a{display:block}
 figure img{width:100%;display:block;aspect-ratio:16/9;object-fit:cover;background:#e5e7eb}
-figcaption{padding:7px 9px;font-size:12px;display:flex;justify-content:space-between;align-items:center;gap:6px}
-figcaption .t{color:var(--text);font-size:16px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:.01em;white-space:nowrap}
-.empty2{color:var(--muted);text-align:center;padding:48px 20px}
-.tabbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;background:rgba(255,255,255,.97);backdrop-filter:blur(10px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
-.tabbar a{flex:1;text-align:center;text-decoration:none;padding:14px 0;font-size:13px;color:var(--muted);cursor:pointer}
-.tabbar a.active{color:var(--blue);font-weight:700}
+figcaption{padding:8px 10px;display:flex;justify-content:space-between;align-items:center;gap:6px}
+figcaption .lab{font-size:12px;font-weight:700;color:var(--text);text-transform:capitalize;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+figcaption .t{display:flex;align-items:baseline;gap:1px;font-variant-numeric:tabular-nums;white-space:nowrap}
+figcaption .t b{color:var(--text);font-size:17px;font-weight:800;letter-spacing:-.01em}
+figcaption .t .mm{color:var(--muted);font-size:12px;font-weight:700}
+.empty2{color:var(--muted);text-align:center;padding:40px 20px;font-size:13px}
+.tabbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+.tabbar a{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;padding:9px 0 8px;font-size:11px;font-weight:600;color:var(--muted);cursor:pointer}
+.tabbar a svg{width:20px;height:20px}
+.tabbar a.active{color:var(--blue)}
 .sheet{position:fixed;inset:0;z-index:40;background:var(--bg);overflow:auto;padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom))}
 .sheet.hidden{display:none}
 .sheetbar{display:flex;align-items:center;margin-bottom:10px}
-.sheetbar b{font-size:16px}
+.sheetbar b{font-size:16px;font-weight:800}
 .sheetbar .icon{margin-left:auto}
-.editor{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:14px;overflow:hidden;cursor:crosshair}
+.editor{position:relative;width:100%;aspect-ratio:16/9;background:#0b1220;border-radius:14px;overflow:hidden;cursor:crosshair;border:1px solid var(--line)}
 .editor img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:translateZ(0)}
 .editor svg{position:absolute;inset:0;width:100%;height:100%;transform:translateZ(0)}
 .tools{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
-.tools button{border:1px solid var(--line);background:#fff;border-radius:12px;padding:11px 15px;cursor:pointer}
+.tools button{border:1px solid var(--line);background:#fff;border-radius:12px;padding:11px 15px;cursor:pointer;font-weight:600;font-size:13px}
+.tools button:hover{background:#f8fafc}
 .tools button.active{background:var(--blue);border-color:var(--blue);color:#fff}
 .tools button.primary{background:var(--green);border-color:var(--green);color:#fff}
 .msg{font-size:12px;color:var(--muted);align-self:center}
 .hint{margin-top:12px;color:var(--muted);font-size:12px}
+img{max-width:100%}
+@media(max-width:440px){
+  .bar{padding:10px 12px 2px;gap:8px}
+  .title{font-size:15px}
+  .subt{display:none}
+  .live{font-size:11px;padding:5px 9px}
+  .logo{width:30px;height:30px}
+  .icon{width:38px;height:38px}
+  .todaylbl{padding:6px 12px 0}
+  .stats{gap:9px;padding:7px 12px 12px}
+  .stat{padding:10px 12px;border-radius:14px}
+  .stat .num{font-size:26px}
+  main{padding:12px 10px}
+  .calhead{gap:6px;margin-bottom:10px}
+  #calTitle{min-width:auto;font-size:15px;flex:1}
+  .pill{padding:8px 13px}
+  .calgrid{gap:4px}
+  .calgrid .dow{font-size:10px;padding:1px 0}
+  .cell{min-height:52px;padding:5px 5px;border-radius:11px}
+  .cell .n{font-size:11px}
+  .cell .badge{font-size:9px;padding:0 4px}
+  .gallery{grid-template-columns:repeat(auto-fill,minmax(138px,1fr));gap:9px}
+  figcaption{padding:7px 8px}
+  figcaption .t b{font-size:15px}
+  figcaption .t .mm,.histhead .c{font-size:11px}
+  .seg{margin-bottom:10px}
+  .sheet{padding:calc(10px + env(safe-area-inset-top)) 10px calc(10px + env(safe-area-inset-bottom))}
+  .tools button{padding:10px 13px}
+}
+@media(max-width:340px){.gallery{grid-template-columns:1fr 1fr}.cell .badge{font-size:8px}}
 </style></head><body>
 <header>
   <div class="bar">
-    <div class="title">Vehicle Tracker</div>
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="6" r="2.4"/><path d="M8.4 18H15a4 4 0 0 0 0-8H9a4 4 0 0 1 0-8h.6"/></svg></div>
+      <div><div class="title">Vehicle Tracker</div><div class="subt">${view === "live" ? "Live view" : view === "calendar" ? "Daily counts" : "Capture history"}</div></div>
+    </div>
     <div class="live"><span class="dot" id="dot"></span><span id="ltxt">…</span></div>
     <button class="icon" id="setupBtn" title="Setup">&#9881;</button>
   </div>
@@ -378,8 +440,10 @@ figcaption .t{color:var(--text);font-size:16px;font-weight:800;font-variant-nume
 </header>
 <main>
   <section id="v-live" class="view${view === "live" ? "" : " hidden"}">
-    <div class="player"><img id="snap" alt="live"></div>
-    ${cam2Panel}
+    <div class="feeds">
+      <div class="feed"><div class="feedtag"><span class="d"></span>Main · counting</div><div class="player"><img id="snap" alt="live"></div></div>
+      ${cam2Panel}
+    </div>
     <div class="sub">Tap the gear to edit the counting line / scan area</div>
   </section>
   <section id="v-cal" class="view${view === "calendar" ? "" : " hidden"}">
@@ -392,17 +456,17 @@ figcaption .t{color:var(--text);font-size:16px;font-weight:800;font-variant-nume
     <div class="calgrid" id="calGrid"></div>
     <div class="hint"><b style="color:var(--green)">IN</b> / <b style="color:var(--red)">OUT</b> per day &middot; &#8592; / &#8594; change day &middot; tap a day for captures</div>
     <div class="histhead" id="calHistHead" style="margin-top:16px"></div>
-    <div class="gallery" id="calDay"></div>
+    <div id="calDay"></div>
   </section>
   <section id="v-hist" class="view${view === "history" ? "" : " hidden"}">
     <div class="histhead" id="histHead"></div>
-    <div class="gallery" id="hist"></div>
+    <div id="hist"></div>
   </section>
 </main>
 <nav class="tabbar">
-  <a href="/live" class="tab${view === "live" ? " active" : ""}">Live</a>
-  <a href="/calendar" class="tab${view === "calendar" ? " active" : ""}">Calendar</a>
-  <a href="/history" class="tab${view === "history" ? " active" : ""}">History</a>
+  <a href="/live" class="tab${view === "live" ? " active" : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4V8z"/></svg><span>Live</span></a>
+  <a href="/calendar" class="tab${view === "calendar" ? " active" : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg><span>Calendar</span></a>
+  <a href="/history" class="tab${view === "history" ? " active" : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4L3 8"/><path d="M3 3v5h5"/><path d="M12 8v4l3 2"/></svg><span>History</span></a>
 </nav>
 <div class="sheet hidden" id="setup">
   <div class="sheetbar"><b>Camera setup</b><button class="icon" id="closeSetup">&#10005;</button></div>
@@ -436,7 +500,7 @@ document.getElementById('sIn').textContent=tc['in']||0;
 document.getElementById('sOut').textContent=tc.out||0;
 function clock(){var n=new Date();document.getElementById('todayLbl').textContent='Today · '+
   n.toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata',weekday:'short',day:'numeric',month:'short'})+' · '+
-  n.toLocaleTimeString('en-GB',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit'})+' IST';}
+  n.toLocaleTimeString('en-GB',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit'})+' IST';}
 clock();setInterval(clock,1000);
 // Keep the IN/OUT header counts live (they used to only render on page load).
 function refreshCounts(){fetch('/api/config',{cache:'no-store'})
@@ -484,6 +548,7 @@ function showTab(id){views.forEach(function(v){v.classList.toggle('hidden',v.id!
   window.scrollTo(0,0);}
 showTab({live:'v-live',calendar:'v-cal',history:'v-hist'}[VIEW]||'v-live');
 var selDay=INIT;
+var dirFilter='in';
 var view=INIT?new Date(INIT+'T00:00:00'):new Date();
 function pad(n){return String(n).padStart(2,'0');}
 function ymd(y,m,d){return y+'-'+pad(m+1)+'-'+pad(d);}
@@ -501,8 +566,9 @@ function renderCal(){
   for(var i=0;i<start;i++)h+='<div class="cell empty"></div>';
   for(var d=1;d<=dim;d++){var k=ymd(y,m,d),c=DAYS[k]||{},future=k>today;
     var cls='cell'+(future?' future':'')+(k===today?' today':'')+(k===selDay?' sel':'');
-    h+='<div class="'+cls+'"'+(future?'':' data-day="'+k+'"')+'><span class="n">'+d+'</span><span class="c">'+
-      '<b class="ci">'+(c['in']||0)+'</b><b class="co">'+(c.out||0)+'</b></span></div>';}
+    var din=c['in']||0,dout=c.out||0;
+    var badges=(din?'<b class="badge ci">'+din+'</b>':'')+(dout?'<b class="badge co">'+dout+'</b>':'');
+    h+='<div class="'+cls+'"'+(future?'':' data-day="'+k+'"')+'><span class="n">'+d+'</span><span class="c">'+badges+'</span></div>';}
   calGrid.innerHTML=h;
   [].slice.call(calGrid.querySelectorAll('[data-day]')).forEach(function(el){
     // Stay on /calendar: reveal the day's captures inline instead of jumping to /history.
@@ -522,6 +588,9 @@ var hist=document.getElementById('hist'),histHead=document.getElementById('histH
 var calDay=document.getElementById('calDay'),calHistHead=document.getElementById('calHistHead');
 function istDay(ts){try{return new Date(ts).toLocaleDateString('sv-SE',{timeZone:'Asia/Kolkata'});}catch(e){return (ts||'').slice(0,10);}}
 function fmt(ts){try{return new Date(ts).toLocaleString('sv-SE',{timeZone:'Asia/Kolkata'});}catch(e){return (ts||'').replace('T',' ').slice(0,19);}}
+// Hours dominate, minutes are secondary, seconds are dropped.
+function fmtTime(ts){var s=fmt(ts).slice(11,16);if(s.length<5)return '<b>'+s+'</b>';
+  return '<b>'+s.slice(0,2)+'</b><span class="mm">'+s.slice(3,5)+'</span>';}
 // Render a capture list into any (head, grid) pair. A day filters to one IST day.
 function renderList(day, headEl, gridEl){
   var list=day?EVENTS.filter(function(e){return istDay(e.ts)===day;}):EVENTS;
@@ -530,13 +599,30 @@ function renderList(day, headEl, gridEl){
   headEl.innerHTML='<span class="d">'+(day?day:'All recent')+'</span>'+
     '<span class="c"><b style="color:var(--green)">'+c['in']+' IN</b> &middot; <b style="color:var(--red)">'+c.out+' OUT</b></span>'+ctrls;
   if(day){var clr=headEl.querySelector('.clearBtn');if(clr)clr.onclick=function(){selectDay(null);};}
-  gridEl.innerHTML=list.length?list.map(function(e){
-    var col=e.dir.toLowerCase()==='in'?'var(--green)':'var(--red)';
+  function card(e){
     return '<figure><a href="/img/'+encodeURIComponent(e.id)+'" target="_blank">'+
       '<img loading="lazy" src="/thumb/'+encodeURIComponent(e.id)+'" alt=""></a>'+
-      '<figcaption><span style="color:'+col+';font-weight:700">'+(e.dir||'').toUpperCase()+' '+e.label+'</span>'+
-      '<span class="t">'+fmt(e.ts).slice(11,19)+'</span></figcaption></figure>';
-  }).join(''):'<div class="empty2">No captures</div>';
+      '<figcaption><span class="lab">'+(e.label||'vehicle')+'</span>'+
+      '<span class="t">'+fmtTime(e.ts)+'</span></figcaption></figure>';
+  }
+  var ins=list.filter(function(e){return e.dir.toLowerCase()==='in';});
+  var outs=list.filter(function(e){return e.dir.toLowerCase()==='out';});
+  // IN / OUT as tabs so a long day's captures aren't one enormous page.
+  if(dirFilter!=='out')dirFilter='in';
+  var seg=document.createElement('div');seg.className='seg';
+  [['in','IN',ins.length],['out','OUT',outs.length]].forEach(function(t){
+    var b=document.createElement('button');b.className=t[0]+(dirFilter===t[0]?' on':'');
+    b.innerHTML=t[1]+' <span class="n">'+t[2]+'</span>';
+    b.onclick=function(){dirFilter=t[0];renderList(day,headEl,gridEl);};
+    seg.appendChild(b);
+  });
+  var items=dirFilter==='out'?outs:ins;
+  gridEl.innerHTML='';
+  var wrap=document.createElement('div');wrap.className='grp';wrap.appendChild(seg);
+  var gal=document.createElement('div');
+  if(items.length){gal.className='gallery';gal.innerHTML=items.map(card).join('');}
+  else{gal.className='empty2';gal.textContent='No '+dirFilter.toUpperCase()+' captures';}
+  wrap.appendChild(gal);gridEl.appendChild(wrap);
 }
 function renderHist(){renderList(selDay,histHead,hist);}
 function renderCalDay(){
