@@ -17,7 +17,9 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   it inline from the substream frame (`persist_capture(..., jpeg=None)`). A locked
   DB is retried (`PRAGMA busy_timeout=5000` + `_safe_store_add`), not fatal.
 - **A stream stall self-heals.** `TRACKER_READ_TIMEOUT` (15 s) forces a reconnect
-  when no fresh frame arrives; `stimeout`/`rw_timeout` bound `cap.read()`.
+  when no fresh frame arrives; an advancing container timestamp counts as alive,
+  so a static scene is not treated as a stall. `stimeout`/`rw_timeout` bound
+  `cap.read()`.
 - **Offline never loses data.** `store.prune` deletes only `synced=1` rows; the
   sync worker deletes local files only after a `2xx`.
 - **Permanent upload errors keep the row.** `sync.py` treats `4xx` as permanent,

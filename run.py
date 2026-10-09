@@ -1154,6 +1154,7 @@ def reader_loop(cfg, latest):
     read_interval = 0.0
     prev_gray = None
     last_fresh = time.time()
+    last_pos = -1.0
 
     while cfg.running:
         try:
@@ -1240,8 +1241,17 @@ def reader_loop(cfg, latest):
                 changed = int((cv2.absdiff(gray, prev_gray) > 6).sum())
                 fresh = changed > 3
             prev_gray = gray
-            if fresh:
+            # A genuinely-new frame (or an advancing container timestamp) means
+            # the stream is alive. The timestamp matters for a legitimately
+            # static, noise-free scene where every frame is bit-identical: that
+            # is not a stall, so it must not trip the reconnect watchdog.
+            try:
+                pos = float(cap.get(cv2.CAP_PROP_POS_MSEC))
+            except Exception:
+                pos = -1.0
+            if fresh or pos > last_pos + 1.0:
                 last_fresh = time.time()
+            last_pos = pos if pos > last_pos else last_pos
             latest.put(frame.copy(), fresh)
         except Exception as e:
             print(f"[reader] error: {e}; reconnecting...", flush=True)

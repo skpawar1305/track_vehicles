@@ -224,8 +224,10 @@ count or a dead worker is not. Invariants the code upholds:
   each wrap their loop body in `try/except` and log + recover. A raise used to
   kill the thread (a daemon) while `run.py` kept "running" and counting.
 - **A stalled stream reconnects itself.** If no genuinely-new frame arrives for
-  `TRACKER_READ_TIMEOUT` (default 15 s) the reader forces a reopen; `stimeout`
-  and `rw_timeout` bound a blocked `cap.read()`.
+  `TRACKER_READ_TIMEOUT` (default 15 s) the reader forces a reopen; an advancing
+  container timestamp counts as alive, so a legitimately static (noise-free)
+  scene is not mistaken for a stall. `stimeout`/`rw_timeout` bound a blocked
+  `cap.read()`.
 - **In-memory counts and the DB never diverge.** If the capture queue is full,
   the crossing is persisted inline from the substream frame instead of dropped.
   A locked DB is retried (`busy_timeout` + a short retry) rather than fatal.
