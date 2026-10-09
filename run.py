@@ -68,6 +68,14 @@ NUM_THREADS = int(os.environ.get("TRACKER_THREADS", "4"))
 MAX_DETECTIONS_PER_FRAME = int(os.environ.get("TRACKER_MAX_DETS", "50"))
 DEFAULT_ENABLED_CLASSES = [2, 5, 7]  # cars, buses, and trucks; exclude bicycles/motorcycles
 EXCLUDED_TWO_WHEELER_CLASSES = {1, 3}  # COCO bicycle and motorcycle
+# One vehicle is often localised as two overlapping boxes whose winning classes
+# differ (car vs truck). At IoU above this we treat them as the same object: in
+# the detector (class-agnostic NMS, the Ultralytics `agnostic_nms` equivalent)
+# and at the crossing (one count). Genuinely adjacent vehicles overlap far less.
+DUP_IOU = float(os.environ.get("TRACKER_DUP_IOU", "0.6"))
+# A duplicate crossing from a different track within this window (and overlapping
+# the previous box) is suppressed. 0 disables the safety net.
+CROSS_DEDUP_S = float(os.environ.get("TRACKER_CROSS_DEDUP_S", "1.0"))
 
 
 def _counting_classes(classes):
@@ -256,6 +264,22 @@ def line_geometry(line, point):
     return dist, t
 
 
+def box_iou(a, b):
+    """Intersection-over-union of two (x1, y1, x2, y2) boxes."""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = ix2 - ix1, iy2 - iy1
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    inter = iw * ih
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    denom = area_a + area_b - inter
+    return inter / denom if denom > 0 else 0.0
+
+
 def detect_crossing(line, old_centroid, new_centroid, flip=False):
     if line is None or old_centroid is None or new_centroid is None:
         return CROSSING_NONE
@@ -366,23 +390,29 @@ class CaptureManager:
     def store_crossing(self, frame, jpeg, track_id, direction, crossed_at=None):
         """Persist one crossing.
 
-        The full image prefers the camera's main-stream still (`jpeg`); the
-        thumbnail is ALWAYS built from the substream `frame` captured at the
-        crossing, so the timeline shows the vehicle at the line rather than the
-        delayed main-stream moment. Pass `jpeg=None` to use the substream frame
-        for both, and to fall back when the fetch was late or failed.
+        Saves two images when the main-stream still is available: the full-size
+        `<id>.jpg` (the camera's main profile, best resolution) and the
+        `<id>_sub.jpg` substream frame captured at the crossing (the accurate
+        moment the vehicle was on the line). The thumbnail is ALWAYS built from
+        the substream frame, so the timeline shows the vehicle at the line
+        rather than the delayed main-stream moment. When `jpeg` is None the
+        substream frame is the only source and is saved as `<id>.jpg` (no
+        separate `_sub` copy, to avoid storing the same pixels twice).
         """
         ts = self._ts(crossed_at)
         direction_label = "in" if direction == 1 else "out"
         filename = f"{ts}_id{track_id}_{direction_label}.jpg"
+        sub = None
         if jpeg is not None:
             with open(os.path.join(self.capture_dir, filename), "wb") as f:
                 f.write(jpeg)
+            sub = f"{ts}_id{track_id}_{direction_label}_sub.jpg"
+            cv2.imwrite(os.path.join(self.capture_dir, sub), frame)
         else:
             cv2.imwrite(os.path.join(self.capture_dir, filename), frame)
         self._thumb(frame, filename)
-        return {"filename": filename, "thumb": f"thumb/{filename}", "timestamp": ts,
-                "track_id": track_id, "direction": direction_label}
+        return {"filename": filename, "thumb": f"thumb/{filename}", "sub": sub,
+                "timestamp": ts, "track_id": track_id, "direction": direction_label}
 
 # ── NanoDet ncnn Detector ─────────────────────────────────────────────
 _VEHICLE_NAMES = {2: 'car', 3: 'motorcycle', 5: 'bus', 7: 'truck', -1: 'motion'}
@@ -528,9 +558,10 @@ class YoloNcnn:
     """YOLO11 detector via ncnn. Output out0 is (4+nc, anchors); letterboxed 640."""
 
     def __init__(self, model_param=YOLO_PARAM, model_bin=None, conf_thresh=0.30,
-                 iou_thresh=0.45, num_threads=NUM_THREADS):
+                 iou_thresh=0.45, num_threads=NUM_THREADS, cross_nms_iou=None):
         self.conf_thresh = conf_thresh
         self.iou_thresh  = iou_thresh
+        self.cross_nms_iou = DUP_IOU if cross_nms_iou is None else cross_nms_iou
         if model_bin is None:
             model_bin = model_param[:-6] + ".bin"
         self.model_param = model_param
@@ -580,6 +611,20 @@ class YoloNcnn:
             order = order[np.where(iou <= self.iou_thresh)[0] + 1]
         return keep
 
+    def _merge_cross_class(self, boxes, scores, keep):
+        """Greedily drop kept boxes that overlap (any class) above the threshold.
+
+        Highest score wins, so a car/truck duplicate pair collapses to the one
+        the model was more sure about.
+        """
+        if self.cross_nms_iou <= 0 or len(keep) < 2:
+            return keep
+        out = []
+        for k in sorted(keep, key=lambda k: float(scores[k]), reverse=True):
+            if all(box_iou(boxes[k], boxes[j]) <= self.cross_nms_iou for j in out):
+                out.append(k)
+        return out
+
     def _run_on_roi(self, roi, enabled_classes, offset_x, offset_y):
         h, w = roi.shape[:2]
         blob, scale, pad_w, pad_h = self._preprocess(roi)
@@ -625,6 +670,14 @@ class YoloNcnn:
         for c in np.unique(cls_ids):
             m = np.nonzero(cls_ids == c)[0]
             keep.extend(m[self._nms(boxes[m], scores[m])].tolist())
+
+        # Cross-class merge: the model often fires two near-identical boxes for
+        # ONE vehicle with different winning classes (car+truck, bus+truck). The
+        # per-class NMS above keeps both, the centroid tracker then mints a
+        # second track, and both cross the line -> a double count. Suppress
+        # across classes at a high IoU so only genuine adjacent vehicles (low
+        # overlap) both survive.
+        keep = self._merge_cross_class(boxes, scores, keep)
 
         out_list = []
         for k in keep:
@@ -1365,6 +1418,7 @@ def capture_loop(cfg, capture_mgr, store, capture_q):
             "line": item["line"],
             "image_path": entry["filename"],
             "thumb_path": entry["thumb"],
+            "sub_path": entry["sub"],
         })
 
 
@@ -1439,6 +1493,9 @@ def main():
     store = Store(os.environ.get("TRACKER_DB_PATH", "events.db"))
 
     last_cross_info = {}
+    # Recent crossings, to collapse one vehicle counted twice (two tracks from
+    # two class-boxes) into a single event.
+    recent_cross    = []
     gate_ids        = set()
     cross_gate      = CrossingGate(min_age=cfg.min_track_age,
                                    min_travel_frac=cfg.min_travel_frac)
@@ -1587,8 +1644,20 @@ def main():
                 info = last_cross_info.get(obj.track_id, {'frame': -60, 'dir': None})
                 if total_frames - info['frame'] < 15:
                     continue
-                last_cross_info[obj.track_id] = {'frame': total_frames, 'dir': crossing}
                 direction = 'IN' if crossing == CROSSING_IN else 'OUT'
+                # Safety net: if another track crossed the same way here moments
+                # ago (the duplicate track from a second class-box), count once.
+                if CROSS_DEDUP_S > 0:
+                    recent_cross = [rc for rc in recent_cross
+                                    if now_t - rc[0] <= CROSS_DEDUP_S]
+                    if any(rc[1] == crossing and box_iou(obj.bbox, rc[2]) > DUP_IOU
+                           for rc in recent_cross):
+                        if debug:
+                            print(f"[dbg] #{obj.track_id} duplicate crossing "
+                                  f"{direction} suppressed")
+                        continue
+                    recent_cross.append((now_t, crossing, tuple(obj.bbox)))
+                last_cross_info[obj.track_id] = {'frame': total_frames, 'dir': crossing}
                 # Hand the capture to a worker: it fetches a full-res main-stream
                 # still (substream fallback) without stalling the track loop.
                 try:

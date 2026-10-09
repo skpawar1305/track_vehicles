@@ -46,9 +46,27 @@
   nonce alive) and falls back to the substream frame if the fetch fails, is stale
   (`TRACKER_CAPTURE_MAX_AGE`, default 1.5 s in the queue), or the endpoint is
   down. Keep the fetch off the main loop (a network call would stall tracking).
-  The **thumbnail is always built from the substream frame at the crossing**, not
-  from the (later) main-stream JPEG, so the timeline shows the vehicle at the line;
-  the main-stream still is the full-size image behind the thumbnail.
+  Two images are stored when the snapshot succeeds: `<id>.jpg` (full-res main
+  stream) and `<id>_sub.jpg` (the crossing substream frame). The **thumbnail is
+  always built from the substream frame at the crossing**, not from the (later)
+  main-stream JPEG, so the timeline shows the vehicle at the line; the main-stream
+  still is the full-size image behind the thumbnail and `/sub/<id>` serves the
+  detection frame.
+- **One vehicle often produces two class-boxes — dedupe at the detector.** The
+  INT8 model frequently fires two near-identical boxes with different winning
+  classes (car+truck, bus+truck; IoU 0.76–0.93) for one vehicle. Per-class NMS
+  keeps both, the tracker then mints a second track, and both cross the line → a
+  double count. `YoloNcnn._merge_cross_class` runs a **class-agnostic NMS** at
+  `TRACKER_DUP_IOU` (default 0.6) after the per-class pass — this is the
+  Ultralytics `agnostic_nms` equivalent. A crossing-level de-dupe safety net
+  (same direction, IoU > `TRACKER_DUP_IOU`, within `TRACKER_CROSS_DEDUP_S`,
+  default 1 s) guarantees one vehicle = one event. Do **not** try to fix this in
+  the centroid tracker, and do not switch to ByteTrack/BoT-SORT: they associate
+  by IoU and drop fast movers at the NVR's ~9 fps.
+- **Offline is safe, but never prune unsynced rows.** `store.prune` deletes only
+  `synced=1` events past `TRACKER_RETENTION_DAYS`; unsynced captures are the only
+  copy while the VPS is unreachable and must be kept until `sync.py` gets a 2xx.
+  Syncing deletes local files only after the server acknowledges.
 - **A second camera can be shown raw (no detection) with no idle cost.**
   `TRACKER_CAM2_URL` (substream) + `CAM2=1` on the VPS render a second `/live`
   panel (`/api/live2`, `/live2.jpg`). The Pi opens the RTSP/relay session only while

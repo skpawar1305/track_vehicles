@@ -31,12 +31,18 @@ class Store:
                 line        TEXT,
                 image_path  TEXT,
                 thumb_path  TEXT,
+                sub_path    TEXT,
                 synced      INTEGER DEFAULT 0,
                 synced_at   TEXT
             )
             """
         )
         self.conn.commit()
+        # Migration for DBs created before sub_path existed.
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(events)")}
+        if "sub_path" not in cols:
+            self.conn.execute("ALTER TABLE events ADD COLUMN sub_path TEXT")
+            self.conn.commit()
 
     @staticmethod
     def _json_safe(v):
@@ -59,15 +65,15 @@ class Store:
             self.conn.execute(
                 """INSERT OR IGNORE INTO events
                    (id, track_id, class_id, label, confidence, direction,
-                    crossed_at, bbox, line, image_path, thumb_path)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    crossed_at, bbox, line, image_path, thumb_path, sub_path)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     ev["id"], ev.get("track_id"), ev.get("class_id"),
                     ev.get("label"), ev.get("confidence"), ev.get("direction"),
                     ev.get("crossed_at") or datetime.now(timezone.utc).isoformat(),
                     json.dumps(self._json_safe(bbox)) if bbox is not None else None,
                     json.dumps(self._json_safe(line)) if line is not None else None,
-                    ev.get("image_path"), ev.get("thumb_path"),
+                    ev.get("image_path"), ev.get("thumb_path"), ev.get("sub_path"),
                 ),
             )
             self.conn.commit()
@@ -100,16 +106,22 @@ class Store:
             return {d: n for d, n in cur.fetchall()}
 
     def prune(self, retention_days=30):
-        """Delete events older than retention_days; return their file paths."""
+        """Delete *synced* events older than retention_days; return file paths.
+
+        Unsynced rows are never auto-deleted: if the VPS is unreachable for
+        longer than the retention window, the captures are still the only copy,
+        so dropping them would lose the crossing. They stay until sync delivers
+        them (or an operator clears them).
+        """
         cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).strftime("%Y-%m-%d")
         with self.lock:
             cur = self.conn.execute(
-                "SELECT id, image_path, thumb_path FROM events "
-                "WHERE date(COALESCE(crossed_at, synced_at)) < ?",
+                "SELECT id, image_path, thumb_path, sub_path FROM events "
+                "WHERE synced=1 AND date(COALESCE(crossed_at, synced_at)) < ?",
                 (cutoff,),
             )
             rows = cur.fetchall()
-            paths = [p for _, ip, tp in rows for p in (ip, tp) if p]
+            paths = [p for row in rows for p in row[1:] if p]
             self.conn.executemany("DELETE FROM events WHERE id=?", [(r[0],) for r in rows])
             self.conn.commit()
             return paths

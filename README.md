@@ -133,6 +133,8 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_CAM2_URL` | – | Optional second camera substream shown raw on `/live` (no detection) |
 | `TRACKER_CAPTURE_URL` | derived | Full-res crossing still (ONVIF main-profile snapshot); substream fallback |
 | `TRACKER_CAPTURE_MAX_AGE` | `1.5` | Queue age (s) after which the main-stream fetch is skipped |
+| `TRACKER_DUP_IOU` | `0.6` | Same-vehicle IoU: detector cross-class NMS + crossing de-dupe |
+| `TRACKER_CROSS_DEDUP_S` | `1` | Window (s) for collapsing a duplicate crossing from a second track |
 
 The reverse terminal agent reads its own file, `/etc/tracker/term.env` (plus
 `TRACKER_TOKEN` from `sync.env`):
@@ -211,7 +213,7 @@ A browser shell into the Pi, carried entirely over the existing outbound channel
 | `direction` | `in` / `out` |
 | `crossed_at` | ISO-8601 UTC |
 | `bbox`, `line` | JSON arrays |
-| `image`, `thumb` | JPEG files (raw frame, no overlay) |
+| `image`, `thumb`, `sub` | JPEG files (raw frame, no overlay; `sub` = detection substream) |
 
 ## Models
 
@@ -265,10 +267,25 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
   `requests.Session` and with a queue-age guard (`TRACKER_CAPTURE_MAX_AGE`,
   default 1.5 s). It falls back to the processed substream frame if the fetch
   fails or is stale. URL/creds default to the stream URL's
-  (`TRACKER_CAPTURE_URL`/`_USER`/`_PASSWORD` to override). The **thumbnail shown
-  in the timeline is always the substream frame from the crossing instant**, so it
-  is not affected by the main-stream fetch delay; the full-size main-stream still
-  opens when you tap it.
+  (`TRACKER_CAPTURE_URL`/`_USER`/`_PASSWORD` to override). When the snapshot
+  succeeds **both** images are stored: `<id>.jpg` (full-res main stream) and
+  `<id>_sub.jpg` (the crossing substream frame, served at `/sub/<id>`). The
+  **thumbnail shown in the timeline is always the substream frame from the
+  crossing instant**, so it is not affected by the main-stream fetch delay; the
+  full-size main-stream still opens when you tap the thumbnail.
+- **One vehicle can arrive as two class-boxes — de-duplicated.** The INT8 detector
+  sometimes fires two near-identical boxes for one vehicle with different winning
+  classes (car/truck), which would otherwise become two tracks and two counts. A
+  class-agnostic NMS (`TRACKER_DUP_IOU`, default 0.6) merges them at the detector
+  (the Ultralytics `agnostic_nms` equivalent), and a crossing-level de-dupe
+  (`TRACKER_CROSS_DEDUP_S`, default 1 s) guarantees one event. Counting stays on a
+  velocity-aware centroid tracker, not ByteTrack/BoT-SORT, because IoU association
+  drops fast movers at the NVR's ~9 fps.
+- **Offline-first, and unsynced rows are never pruned.** Events and images queue
+  locally until `sync.py` gets a 2xx from the VPS, which is the only point a local
+  file is deleted. `store.prune` only removes `synced=1` rows older than
+  `TRACKER_RETENTION_DAYS`, so a VPS outage longer than the retention window
+  cannot lose un-synced captures.
 
 ## License
 

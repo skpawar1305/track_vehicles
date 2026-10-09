@@ -12,5 +12,6 @@ export const events = sqliteTable("events", {
   line: text("line"),
   imagePath: text("image_path"),
   thumbPath: text("thumb_path"),
+  subPath: text("sub_path"),
   createdAt: text("created_at").notNull(),
 });

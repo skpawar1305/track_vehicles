@@ -27,6 +27,7 @@ const istDay = (col: string) => `date(${col}, '${IST_SHIFT}')`;
 const istNow = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
 
 mkdirSync(`${CAPTURES_DIR}/thumb`, { recursive: true });
+mkdirSync(`${CAPTURES_DIR}/sub`, { recursive: true });
 
 const sqlite = new Database(DB_PATH, { create: true });
 sqlite.exec(`
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS events (
   line        TEXT,
   image_path  TEXT,
   thumb_path  TEXT,
+  sub_path    TEXT,
   created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS camera_config (
@@ -49,6 +51,11 @@ CREATE TABLE IF NOT EXISTS camera_config (
   data       TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );`);
+// Migration for DBs created before the substream image column existed.
+const eventCols = new Set(
+  (sqlite.query("PRAGMA table_info(events)").all() as { name: string }[]).map((c) => c.name),
+);
+if (!eventCols.has("sub_path")) sqlite.exec("ALTER TABLE events ADD COLUMN sub_path TEXT");
 const db = drizzle(sqlite);
 
 // ── Camera config (normalized 0..1 coords; set in dashboard, pulled by Pi) ──
@@ -230,9 +237,11 @@ function unauthorized() {
   });
 }
 
-async function serveImage(id: string, thumb: boolean) {
+async function serveImage(id: string, variant: "full" | "thumb" | "sub") {
   const row = db.select().from(events).where(eq(events.id, id)).get();
-  const rel = thumb ? row?.thumbPath : row?.imagePath;
+  const rel = variant === "thumb" ? row?.thumbPath
+            : variant === "sub" ? row?.subPath
+            : row?.imagePath;
   if (!rel) return new Response("not found", { status: 404 });
   const file = Bun.file(`${CAPTURES_DIR}/${rel}`);
   if (!(await file.exists())) return new Response("not found", { status: 404 });
@@ -242,9 +251,10 @@ async function serveImage(id: string, thumb: boolean) {
 type EventRow = {
   id: string; label: string | null; direction: string | null;
   track_id: number | null; crossed_at: string | null; created_at: string;
+  sub_path: string | null;
 };
 
-type DayEvent = { id: string; label: string; dir: string; track: number | null; ts: string };
+type DayEvent = { id: string; label: string; dir: string; track: number | null; ts: string; sub: boolean };
 
 // Day-bucketed IN/OUT counts, shared by the initial page render and
 // GET /api/events so the timeline can auto-refresh without a reload.
@@ -261,13 +271,13 @@ function loadDayStats() {
 // page makes first paint tiny and day switching snappy even after months of data.
 function loadDay(day: string) {
   const rows = sqlite
-    .query(`SELECT id,label,direction,track_id,crossed_at,created_at FROM events
+    .query(`SELECT id,label,direction,track_id,crossed_at,created_at,sub_path FROM events
             WHERE ${istDay("COALESCE(crossed_at, created_at)")} = ?
             ORDER BY COALESCE(crossed_at, created_at) DESC LIMIT 1000`)
     .all(day) as EventRow[];
   const events: DayEvent[] = rows.map((r) => ({
     id: r.id, label: r.label ?? "", dir: r.direction ?? "", track: r.track_id,
-    ts: r.crossed_at || r.created_at || "",
+    ts: r.crossed_at || r.created_at || "", sub: !!r.sub_path,
   }));
   const counts = {
     in: events.filter((e) => e.dir.toLowerCase() === "in").length,
@@ -372,6 +382,8 @@ figcaption .lab{font-size:12px;font-weight:700;color:var(--text);text-transform:
 figcaption .t{display:flex;align-items:baseline;gap:1px;font-variant-numeric:tabular-nums;white-space:nowrap}
 figcaption .t b{color:var(--text);font-size:17px;font-weight:800;letter-spacing:-.01em}
 figcaption .t .mm{color:var(--muted);font-size:12px;font-weight:700}
+figcaption a.figsub{font-size:10px;font-weight:700;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 6px;text-decoration:none;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+figcaption a.figsub:hover{color:var(--blue);border-color:var(--blue)}
 .empty2{color:var(--muted);text-align:center;padding:40px 20px;font-size:13px}
 .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
 .tabbar a{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;padding:9px 0 8px;font-size:11px;font-weight:600;color:var(--muted);cursor:pointer}
@@ -585,9 +597,10 @@ function renderList(day, list, counts, headEl, gridEl){
   headEl.innerHTML='<span class="d">'+dayLabel(day)+'</span>'+
     '<span class="c"><b style="color:var(--green)">'+counts['in']+' IN</b> &middot; <b style="color:var(--red)">'+counts.out+' OUT</b></span>';
   function card(e){
+    var sub=e.sub?'<a class="figsub" href="/sub/'+encodeURIComponent(e.id)+'" target="_blank" title="Detection frame (substream)">line</a>':'';
     return '<figure><a href="/img/'+encodeURIComponent(e.id)+'" target="_blank">'+
       '<img loading="lazy" src="/thumb/'+encodeURIComponent(e.id)+'" alt=""></a>'+
-      '<figcaption><span class="lab">'+(e.label||'vehicle')+'</span>'+
+      '<figcaption><span class="lab">'+(e.label||'vehicle')+'</span>'+sub+
       '<span class="t">'+fmtTime(e.ts)+'</span></figcaption></figure>';
   }
   var ins=list.filter(function(e){return e.dir.toLowerCase()==='in';});
@@ -704,12 +717,12 @@ const RETENTION_DAYS = Number(process.env.RETENTION_DAYS ?? 30);
 function pruneOldEvents() {
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 86400000).toISOString().slice(0, 10);
   const old = sqlite
-    .query(`SELECT image_path, thumb_path FROM events
+    .query(`SELECT image_path, thumb_path, sub_path FROM events
             WHERE date(COALESCE(crossed_at, created_at)) < ?`)
-    .all(cutoff) as { image_path: string | null; thumb_path: string | null }[];
+    .all(cutoff) as { image_path: string | null; thumb_path: string | null; sub_path: string | null }[];
   if (!old.length) return 0;
   for (const r of old) {
-    for (const rel of [r.image_path, r.thumb_path]) {
+    for (const rel of [r.image_path, r.thumb_path, r.sub_path]) {
       if (rel) { try { unlinkSync(`${CAPTURES_DIR}/${rel}`); } catch {} }
     }
   }
@@ -780,10 +793,13 @@ Bun.serve({
       if (!id) return new Response("missing id", { status: 400 });
       const image = form.get("image");
       const thumb = form.get("thumb");
+      const sub = form.get("sub");
       const imagePath = image instanceof File ? `${id}.jpg` : "";
       const thumbPath = thumb instanceof File ? `thumb/${id}.jpg` : "";
+      const subPath = sub instanceof File ? `sub/${id}.jpg` : null;
       if (image instanceof File) await Bun.write(`${CAPTURES_DIR}/${imagePath}`, image);
       if (thumb instanceof File) await Bun.write(`${CAPTURES_DIR}/${thumbPath}`, thumb);
+      if (sub instanceof File) await Bun.write(`${CAPTURES_DIR}/${subPath}`, sub);
       db.insert(events)
         .values({
           id,
@@ -797,6 +813,7 @@ Bun.serve({
           line: str(form.get("line")),
           imagePath,
           thumbPath,
+          subPath,
           createdAt: new Date().toISOString(),
         })
         .onConflictDoNothing()
@@ -1003,8 +1020,9 @@ Bun.serve({
         },
       });
     }
-    if (url.pathname.startsWith("/img/")) return serveImage(decodeURIComponent(url.pathname.slice(5)), false);
-    if (url.pathname.startsWith("/thumb/")) return serveImage(decodeURIComponent(url.pathname.slice(7)), true);
+    if (url.pathname.startsWith("/img/")) return serveImage(decodeURIComponent(url.pathname.slice(5)), "full");
+    if (url.pathname.startsWith("/thumb/")) return serveImage(decodeURIComponent(url.pathname.slice(7)), "thumb");
+    if (url.pathname.startsWith("/sub/")) return serveImage(decodeURIComponent(url.pathname.slice(5)), "sub");
     return new Response("not found", { status: 404 });
   },
 });

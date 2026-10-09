@@ -41,12 +41,20 @@ def post_event(api_url, token, capture_dir, ev):
         tp = os.path.join(capture_dir, ev["thumb_path"])
         if os.path.isfile(tp):
             thumb = tp
+    sub = None
+    if ev.get("sub_path"):
+        sp = os.path.join(capture_dir, ev["sub_path"])
+        if os.path.isfile(sp):
+            sub = sp
     try:
         with open(img, "rb") as fh:
             files = {"image": (ev["image_path"], fh, "image/jpeg")}
             if thumb:
                 th = open(thumb, "rb")
                 files["thumb"] = (ev["thumb_path"], th, "image/jpeg")
+            if sub:
+                sf = open(sub, "rb")
+                files["sub"] = (ev["sub_path"], sf, "image/jpeg")
             try:
                 r = requests.post(api_url, data=data, files=files,
                                   headers={"Authorization": f"Bearer {token}"},
@@ -54,6 +62,8 @@ def post_event(api_url, token, capture_dir, ev):
             finally:
                 if thumb:
                     th.close()
+                if sub:
+                    sf.close()
         if r.ok:
             return True, r.text[:200], True
         return False, f"HTTP {r.status_code}: {r.text[:200]}", False
@@ -62,7 +72,7 @@ def post_event(api_url, token, capture_dir, ev):
 
 
 def delete_local(capture_dir, ev):
-    for rel in (ev.get("image_path"), ev.get("thumb_path")):
+    for rel in (ev.get("image_path"), ev.get("thumb_path"), ev.get("sub_path")):
         if not rel:
             continue
         p = os.path.join(capture_dir, rel)
