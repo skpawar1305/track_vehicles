@@ -1725,15 +1725,20 @@ def main():
 
             # Push annotated frame to the VPS live feed (~5 fps, non-blocking).
             # Keep doing this even on a repeated frame so a static scene does not
-            # time out the dashboard (it only relays, it does not track).
+            # time out the dashboard (it only relays, it does not track). The
+            # whole block is best-effort: an annotation/encode failure must never
+            # take down the counting loop (live is a view, not a source of truth).
             if live_url and cfg.live_wanted and now_t - last_live >= 0.2:
                 last_live = now_t
-                ann = annotate_live(frame, line_px, objects, {"in": c_in, "out": c_out},
-                                    roi=roi_px, flip=cfg.flip_sides)
-                ok, jpeg = cv2.imencode('.jpg', ann, [cv2.IMWRITE_JPEG_QUALITY, LIVE_QUALITY])
-                if ok:
-                    try: live_q.put_nowait(jpeg.tobytes())
-                    except Full: pass
+                try:
+                    ann = annotate_live(frame, line_px, objects, {"in": c_in, "out": c_out},
+                                        roi=roi_px, flip=cfg.flip_sides)
+                    ok, jpeg = cv2.imencode('.jpg', ann, [cv2.IMWRITE_JPEG_QUALITY, LIVE_QUALITY])
+                    if ok:
+                        try: live_q.put_nowait(jpeg.tobytes())
+                        except Full: pass
+                except Exception as e:
+                    _log_throttled("live_ann", f"[live] annotation failed: {e}", every=60)
 
             # Periodic rate report (tracking is decoupled from detection).
             if time.time() - stat_t >= 10:
