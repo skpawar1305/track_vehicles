@@ -14,6 +14,9 @@ const HOST = process.env.HOST ?? "127.0.0.1";
 // A browser shell into the edge is powerful and risky, so /terminal is opt-in:
 // set ENABLE_TERMINAL=1 in /etc/tracker/web.env to turn it on.
 const ENABLE_TERMINAL = process.env.ENABLE_TERMINAL === "1";
+// Second (raw) camera on the live page. The Pi relays its substream as JPEGs;
+// this only serves them. Enable with CAM2=1 in web.env.
+const CAM2 = process.env.CAM2 === "1";
 
 // Dashboard display + day-bucketing timezone: IST (UTC+5:30). Timestamps are
 // stored in UTC; shift only for grouping/labels so calendar days and "today"
@@ -104,6 +107,13 @@ let liveAt = 0;
 let liveSeq = 0;
 let liveViewers = 0;   // active /live.mjpg clients
 let liveJpgAt = 0;     // last /live.jpg request (setup editor snapshot)
+
+// Camera 2: raw substream relayed by the Pi with no detection (optional).
+let live2Frame: Uint8Array | null = null;
+let live2At = 0;
+let live2Seq = 0;
+let live2Viewers = 0;
+let live2JpgAt = 0;
 
 // ── Web terminal (reverse WebSocket: Pi dials out, browser drives it) ───
 // The Pi is behind NAT and only makes outbound connections, so the edge agent
@@ -276,6 +286,9 @@ function dashboard(view: "live" | "calendar" | "history", initialDay: string | n
   const { cIn, cOut, dayStats, events } = loadEventData();
   const init = initialDay && /^\d{4}-\d{2}-\d{2}$/.test(initialDay) ? initialDay : null;
   const J = (o: unknown) => JSON.stringify(o).replace(/</g, "\\u003c");
+  const cam2Panel = CAM2
+    ? `<div class="player" id="cam2" style="margin-top:12px"><img id="snap_cam2" alt="camera 2"></div>`
+    : "";
 
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8">
@@ -366,6 +379,7 @@ figcaption .t{color:var(--text);font-size:16px;font-weight:800;font-variant-nume
 <main>
   <section id="v-live" class="view${view === "live" ? "" : " hidden"}">
     <div class="player"><img id="snap" alt="live"></div>
+    ${cam2Panel}
     <div class="sub">Tap the gear to edit the counting line / scan area</div>
   </section>
   <section id="v-cal" class="view${view === "calendar" ? "" : " hidden"}">
@@ -416,6 +430,7 @@ let TOTALS={in:${cIn},out:${cOut}};
 <script>
 (function(){
 var S=document.getElementById('snap'),dot=document.getElementById('dot'),ltxt=document.getElementById('ltxt');
+var SC2=document.getElementById('snap_cam2');
 var tk=todayKey(),tc=DAYS[tk]||{};
 document.getElementById('sIn').textContent=tc['in']||0;
 document.getElementById('sOut').textContent=tc.out||0;
@@ -439,6 +454,7 @@ S.onerror=function(){dot.classList.remove('on');ltxt.textContent='idle';};
 // connection (which never reconnects after a server restart). Polling also keeps
 // the server's live_wanted flag alive so the camera keeps uploading.
 var liveOn=false,pumpTimer=null,lastURL=null;
+var live2On=false,pumpTimer2=null,lastURL2=null;
 function liveTick(){
   if(!liveOn)return;
   fetch('/live.jpg',{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.blob();})
@@ -446,9 +462,20 @@ function liveTick(){
       if(lastURL)URL.revokeObjectURL(lastURL);lastURL=u;})
     .catch(function(){});
 }
+// Camera 2 (raw substream, no detection) polls on a slower cadence; polling it
+// flips the server's live2_wanted so the Pi starts relaying.
+function live2Tick(){
+  if(!live2On||!SC2)return;
+  fetch('/live2.jpg',{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.blob();})
+    .then(function(b){var u=URL.createObjectURL(b);SC2.src=u;
+      if(lastURL2)URL.revokeObjectURL(lastURL2);lastURL2=u;})
+    .catch(function(){});
+}
 function setLive(on){if(on===liveOn)return;liveOn=on;
-  if(on){liveTick();pumpTimer=setInterval(liveTick,250);}
-  else if(pumpTimer){clearInterval(pumpTimer);pumpTimer=null;}}
+  if(on){liveTick();pumpTimer=setInterval(liveTick,250);
+    if(SC2){live2On=true;live2Tick();pumpTimer2=setInterval(live2Tick,500);}}
+  else{if(pumpTimer){clearInterval(pumpTimer);pumpTimer=null;}
+    live2On=false;if(pumpTimer2){clearInterval(pumpTimer2);pumpTimer2=null;}}}
 var views=[].slice.call(document.querySelectorAll('.view'));
 // Each view is its own route (/live, /calendar, /history); the nav links do a
 // normal navigation, so we only reveal the route's view and toggle the live pump.
@@ -708,11 +735,24 @@ Bun.serve({
       return Response.json({ ok: true, bytes: buf.byteLength, at: liveAt, seq: liveSeq });
     }
 
+    // Camera-2 raw frame push — Bearer token (Pi → VPS, no detection)
+    if (url.pathname === "/api/live2" && req.method === "POST") {
+      if (!bearerOk(req)) return new Response("unauthorized", { status: 401 });
+      const buf = await req.arrayBuffer();
+      if (buf.byteLength > 0) {
+        live2Frame = new Uint8Array(buf);
+        live2At = Date.now();
+        live2Seq++;
+      }
+      return Response.json({ ok: true, bytes: buf.byteLength, at: live2At, seq: live2Seq });
+    }
+
     // Camera config — Pi pulls with Bearer, dashboard reads/writes with Basic
     if (url.pathname === "/api/config" && req.method === "GET") {
       if (!bearerOk(req) && !basicOk(req)) return unauthorized();
       // The Pi uses live_wanted to only encode/upload while someone is watching.
       const live_wanted = liveViewers > 0 || Date.now() - liveJpgAt < 10_000;
+      const live2_wanted = live2Viewers > 0 || Date.now() - live2JpgAt < 10_000;
       const cnt = sqlite
         .query("SELECT direction, COUNT(*) AS c FROM events GROUP BY direction")
         .all() as { direction: string; c: number }[];
@@ -727,6 +767,7 @@ Bun.serve({
       const tOut = tcnt.find((r) => r.direction === "out")?.c ?? 0;
       return Response.json({
         ...getConfig(), viewers: liveViewers, live_wanted,
+        live2_wanted, cam2: CAM2,
         counts: { in: allIn, out: allOut },
         today: { date: istNow(), in: tIn, out: tOut },
       });
@@ -798,6 +839,19 @@ Bun.serve({
           "cache-control": "no-store",
           "x-live-seq": String(liveSeq),
           "x-live-age": String(Date.now() - liveAt),
+        },
+      });
+    }
+
+    if (url.pathname === "/live2.jpg") {
+      live2JpgAt = Date.now();
+      if (!live2Frame || Date.now() - live2At > 10_000) return new Response("no live feed", { status: 404 });
+      return new Response(live2Frame, {
+        headers: {
+          "content-type": "image/jpeg",
+          "cache-control": "no-store",
+          "x-live-seq": String(live2Seq),
+          "x-live-age": String(Date.now() - live2At),
         },
       });
     }

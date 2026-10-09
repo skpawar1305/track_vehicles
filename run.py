@@ -109,6 +109,16 @@ class Config:
         # Cameras whose RTSP Digest is SHA-256 (OpenCV's FFmpeg only does MD5)
         # are reached through the local RtspRelay UDP->SDP shim.
         self.relay = os.environ.get("TRACKER_RTSP_RELAY", "0") == "1"
+        # Optional second camera: its raw substream is shown on the dashboard with
+        # no detection. It stays fully idle (no RTSP session, no decode, no upload)
+        # until someone is watching /live.
+        self.cam2_url = os.environ.get("TRACKER_CAM2_URL", "")
+        self.cam2_sdp = os.environ.get("TRACKER_CAM2_SDP", "/tmp/tracker_cam2.sdp")
+        self.cam2_port = int(os.environ.get("TRACKER_CAM2_PORT", "5006"))
+        self.live2_url = os.environ.get("TRACKER_LIVE2_URL", "")
+        if not self.live2_url and _live:
+            self.live2_url = _live.replace("/api/live", "/api/live2")
+        self.live2_wanted = False
         self._load()
 
     def _load(self):
@@ -129,6 +139,7 @@ class Config:
                 self.enabled_classes = _counting_classes(
                     data.get("enabled_classes", DEFAULT_ENABLED_CLASSES))
                 self.relay = bool(data.get("relay", self.relay))
+                self.cam2_url = data.get("cam2_url", self.cam2_url)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
@@ -138,7 +149,8 @@ class Config:
                     "norm_line": self.norm_line, "norm_roi": self.norm_roi,
                     "conf_thresh": self.conf_thresh, "flip_sides": self.flip_sides,
                     "capture_dir": self.capture_dir, "max_captures": self.max_captures,
-                    "enabled_classes": self.enabled_classes, "relay": self.relay}
+                    "enabled_classes": self.enabled_classes, "relay": self.relay,
+                    "cam2_url": self.cam2_url}
         with open(CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
 
@@ -1152,6 +1164,79 @@ def live_loop(url, token, live_q, cfg):
         except Exception:
             pass
 
+def cam2_loop(cfg, live2_q, stop):
+    """Relay camera 2's substream to the dashboard as raw JPEGs (no detection).
+
+    An idle edge consumes nothing: the RTSP session is only opened while
+    ``live2_wanted`` is set (someone is watching /live) and is torn down a few
+    seconds after it clears, so the camera stops sending and no decode runs.
+    Frames are only decoded to re-encode a small JPEG; there is no inference.
+    """
+    relay = None
+    cap = None
+    idle_since = None
+    last_live = 0.0
+    while not stop.is_set():
+        if not cfg.live2_wanted:
+            # Drop the session after a short grace so brief reconnects don't flap.
+            if cap is not None:
+                if idle_since is None:
+                    idle_since = time.time()
+                elif time.time() - idle_since >= 5.0:
+                    cap.release(); cap = None
+                    if relay is not None: relay.stop(); relay = None
+                    idle_since = None
+                    print("[cam2] idle, stream closed")
+            time.sleep(0.2)
+            continue
+        idle_since = None
+        try:
+            if cap is None:
+                relay = RtspRelay(cfg.cam2_url, sdp_path=cfg.cam2_sdp,
+                                  local_port=cfg.cam2_port, auth="sha256")
+                relay.start()
+                if not relay.ready.wait(timeout=12):
+                    print("[cam2] relay not ready, retrying in 5s")
+                    relay.stop(); relay = None
+                    time.sleep(5); continue
+                cap = cv2.VideoCapture(relay.sdp_path, cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                if not cap.isOpened():
+                    print("[cam2] open failed, retrying in 5s")
+                    cap.release(); cap = None; relay.stop(); relay = None
+                    time.sleep(5); continue
+                print("[cam2] live (substream)")
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                raise RuntimeError("read failed")
+            now = time.time()
+            if now - last_live >= 0.2:
+                last_live = now
+                h, w = frame.shape[:2]
+                if h > LIVE_HEIGHT:
+                    frame = cv2.resize(frame, (max(1, int(w * LIVE_HEIGHT / h)), LIVE_HEIGHT),
+                                       interpolation=cv2.INTER_AREA)
+                ok2, jpg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, LIVE_QUALITY])
+                if ok2:
+                    try: live2_q.put_nowait(jpg.tobytes())
+                    except Full: pass
+        except Exception as e:
+            if stop.is_set():
+                break
+            print(f"[cam2] {e}; reconnecting in 3s")
+            if cap is not None:
+                cap.release(); cap = None
+            if relay is not None:
+                try: relay.stop()
+                except Exception: pass
+                relay = None
+            time.sleep(3)
+    if cap is not None:
+        cap.release()
+    if relay is not None:
+        relay.stop()
+    print("[cam2] Done")
+
 def config_loop(cfg):
     """Polls the server for line/scan-area config and applies changes."""
     import requests
@@ -1162,6 +1247,7 @@ def config_loop(cfg):
             if r.ok:
                 data = r.json()
                 cfg.live_wanted = bool(data.get("live_wanted", False))
+                cfg.live2_wanted = bool(data.get("live2_wanted", False))
                 if data.get("updated_at") != cfg.config_updated_at:
                     cfg.apply_remote(data)
                     print(f"[config] applied remote config (line={cfg.norm_line}, roi={bool(cfg.norm_roi)}, "
@@ -1243,6 +1329,14 @@ def main():
         threading.Thread(target=live_loop, args=(live_url, live_token, live_q, cfg),
                          daemon=True).start()
         print(f"[main] Live relay -> {live_url}")
+
+    # Second camera (raw substream) — only streams while someone watches /live.
+    live2_q = Queue(maxsize=1)
+    if cfg.cam2_url and cfg.live2_url:
+        threading.Thread(target=live_loop, args=(cfg.live2_url, live_token, live2_q, cfg),
+                         daemon=True).start()
+        threading.Thread(target=cam2_loop, args=(cfg, live2_q, stop), daemon=True).start()
+        print(f"[main] Camera 2 live -> {cfg.live2_url}")
 
     # Pull line / scan-area config from the server (Pi is outbound-only)
     if cfg.config_url:

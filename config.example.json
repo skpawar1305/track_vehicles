@@ -13,5 +13,6 @@
     5,
     7
   ],
-  "relay": false
+  "relay": false,
+  "cam2_url": ""
 }

@@ -39,6 +39,11 @@
   5h30m behind — local time mistaken for UTC). `tools/set_camera_time.py` reads/sets it over
   ONVIF (`SetSystemDateAndTime` + `SetNTP`, WS-UsernameToken; password via
   `TRACKER_CAM_PASSWORD`). Keep it on NTP so it self-corrects.
+- **A second camera can be shown raw (no detection) with no idle cost.**
+  `TRACKER_CAM2_URL` (substream) + `CAM2=1` on the VPS render a second `/live`
+  panel (`/api/live2`, `/live2.jpg`). The Pi opens the RTSP/relay session only while
+  `live2_wanted` is set and tears it down ~5 s after the last viewer, so an idle edge
+  streams nothing. The main feed's `live_wanted` gate is the same idea.
 - **Tracking at low fps: do not use IoU association.** At 10-20 fps a vehicle can move
   farther than its own box between samples, so ByteTrack (IoU) returns nothing after the
   first frame and fast movers are never counted. `run.py` uses a velocity-aware

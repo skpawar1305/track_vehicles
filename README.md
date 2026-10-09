@@ -130,6 +130,7 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_VULKAN` | `0` | Optional GPU compute (use fp32 model) |
 | `TRACKER_CAPTURE_PIPELINE` | – | GStreamer pipeline, e.g. Pi hardware `v4l2h264dec` |
 | `TRACKER_RTSP_RELAY` | `0` | Route capture through `RtspRelay` for SHA-256 Digest cameras |
+| `TRACKER_CAM2_URL` | – | Optional second camera substream shown raw on `/live` (no detection) |
 
 The reverse terminal agent reads its own file, `/etc/tracker/term.env` (plus
 `TRACKER_TOKEN` from `sync.env`):
@@ -149,7 +150,8 @@ to grant more privilege (not recommended).
 cd web
 bun install
 # env: DB_PATH, CAPTURES_DIR, TRACKER_TOKEN, DASH_USER, DASH_PASS, PORT=3010,
-#      HOST=127.0.0.1, ENABLE_TERMINAL=1 (opt-in reverse shell at /terminal)
+#      HOST=127.0.0.1, ENABLE_TERMINAL=1 (opt-in reverse shell at /terminal),
+#      CAM2=1 (second raw camera on /live; Pi sets TRACKER_CAM2_URL)
 bun run server.ts
 ```
 
@@ -172,6 +174,9 @@ Pages (each its own URL; `/` redirects to `/live`):
 - **Machine auth:** `/api/ingest`, `/api/live`, and `GET /api/config` accept the `TRACKER_TOKEN` bearer.
 - **Live feed:** the Pi POSTs annotated frames to `/api/live` only while a viewer is present
   (`live_wanted`); the page polls `/live.jpg` snapshots (self-recovering after restarts).
+  A second camera can be shown raw alongside: with `CAM2=1` the Pi POSTs its substream to
+  `/api/live2` (no detection) and the page polls `/live2.jpg` — again only while watched, so
+  an idle edge streams nothing.
 - **Auto-refresh:** the calendar and history views poll `GET /api/events` every 8 s and
   re-render only when the event count changes; the header counts refresh from `GET /api/config`.
 
