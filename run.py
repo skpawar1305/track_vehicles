@@ -185,6 +185,11 @@ class Config:
         # ncnn inference threads; also read from config.json so it can be lowered
         # on-device (heat/CPU) without editing the root-owned tracker.env.
         self.threads = int(os.environ.get("TRACKER_THREADS", str(NUM_THREADS)))
+        # Model selection, overridable per-device from config.json so the model
+        # can be A/B'd without editing the root-owned tracker.env.
+        self.model = YOLO_MODEL
+        self.model_imgsz = YOLO_IMGSZ
+        self.int8 = YOLO_INT8
         # Debug overlay (hysteresis band + per-track re-arm state) on the live feed.
         self.debug_overlay = os.environ.get("TRACKER_DEBUG_OVERLAY", "0") == "1"
         self.running = True
@@ -241,6 +246,9 @@ class Config:
                 self.debug_overlay = bool(data.get("debug_overlay", self.debug_overlay))
                 self.cross_rearm_frac = float(
                     data.get("cross_rearm_frac", self.cross_rearm_frac))
+                self.model = data.get("model", self.model)
+                self.model_imgsz = data.get("model_imgsz", self.model_imgsz)
+                self.int8 = bool(data.get("int8", self.int8))
                 self.cam2_url = data.get("cam2_url", self.cam2_url)
                 self.capture_url = data.get("capture_url", self.capture_url)
             self._derive_capture()
@@ -274,6 +282,9 @@ class Config:
                     "threads": self.threads,
                     "debug_overlay": self.debug_overlay,
                     "cross_rearm_frac": self.cross_rearm_frac,
+                    "model": self.model,
+                    "model_imgsz": self.model_imgsz,
+                    "int8": self.int8,
                     "cam2_url": self.cam2_url, "capture_url": self.capture_url}
         with open(CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
@@ -676,7 +687,8 @@ class YoloNcnn:
     """YOLO11 detector via ncnn. Output out0 is (4+nc, anchors); letterboxed 640."""
 
     def __init__(self, model_param=YOLO_PARAM, model_bin=None, conf_thresh=0.30,
-                 iou_thresh=0.45, num_threads=NUM_THREADS, cross_nms_iou=None):
+                 iou_thresh=0.45, num_threads=NUM_THREADS, cross_nms_iou=None,
+                 input_wh=None):
         self.conf_thresh = conf_thresh
         self.iou_thresh  = iou_thresh
         self.cross_nms_iou = DUP_IOU if cross_nms_iou is None else cross_nms_iou
@@ -684,8 +696,10 @@ class YoloNcnn:
             model_bin = model_param[:-6] + ".bin"
         self.model_param = model_param
         self.model_bin   = model_bin
-        self.h, self.w   = YOLO_H, YOLO_W
-        self.size        = YOLO_W
+        # Network input size: from the config-selected model, else the env default.
+        self.w, self.h   = (int(input_wh[0]), int(input_wh[1])) if input_wh \
+            else (YOLO_W, YOLO_H)
+        self.size        = self.w
         self.net = ncnn.Net()
         self.net.opt.num_threads = num_threads
         # Optional GPU compute (Raspberry Pi 5 has Vulkan 1.2). INT8 models run on
@@ -903,14 +917,17 @@ class HybridDetector:
     """
 
     def __init__(self, conf_thresh=0.30, motion_scale=0.5, motion_min_area=12,
-                 margin=0.08, hold_seconds=None, heartbeat=None, num_threads=None):
+                 margin=0.08, hold_seconds=None, heartbeat=None, num_threads=None,
+                 model_param=YOLO_PARAM, input_wh=None):
         if hold_seconds is None:
             hold_seconds = float(os.environ.get("TRACKER_MOTION_HOLD", "60"))
         if heartbeat is None:
             heartbeat = float(os.environ.get("TRACKER_MOTION_HEARTBEAT", "3"))
         self.motion = MotionDetector(scale=motion_scale, min_area=motion_min_area)
-        self.yolo = YoloNcnn(conf_thresh=conf_thresh,
-                             num_threads=NUM_THREADS if num_threads is None else num_threads)
+        self.yolo = YoloNcnn(model_param=model_param,
+                             conf_thresh=conf_thresh,
+                             num_threads=NUM_THREADS if num_threads is None else num_threads,
+                             input_wh=input_wh)
         self.margin = margin
         self.hold = hold_seconds
         self.heartbeat = heartbeat
@@ -1771,21 +1788,30 @@ def main():
     print("[main] Starting Vehicle Line Counter")
     print(f"[main] Stream: {cfg.stream_url}")
 
+    # Model selected by config.json (falling back to the tracker.env defaults),
+    # so the model can be A/B'd on-device without editing the root-owned env.
+    model_dir   = MODEL_DIR / f"{cfg.model}_ncnn_{cfg.model_imgsz}"
+    model_param = str(model_dir / ("model_int8.ncnn.param" if cfg.int8 else "model.ncnn.param"))
+    model_wh    = _parse_imgsz(cfg.model_imgsz)
+    model_label = f"{cfg.model}_ncnn_{cfg.model_imgsz}"
+
     if cfg.detector == "motion":
         detector    = MotionDetector(scale=cfg.motion_scale, min_area=cfg.motion_min_area)
         print(f"[main] Motion detector (scale={cfg.motion_scale}, min_area={cfg.motion_min_area})")
     elif cfg.detector == "yolo":
-        detector    = YoloNcnn(conf_thresh=cfg.conf_thresh, num_threads=cfg.threads)
-        print(f"[main] YOLO11 ncnn loaded ({YOLO_PARAM.split('/')[-2]}, {cfg.threads} threads)")
+        detector    = YoloNcnn(model_param=model_param, conf_thresh=cfg.conf_thresh,
+                               num_threads=cfg.threads, input_wh=model_wh)
+        print(f"[main] YOLO11 ncnn loaded ({model_label}, {cfg.threads} threads)")
     else:
         detector    = HybridDetector(conf_thresh=cfg.conf_thresh,
                                      motion_scale=cfg.motion_scale,
                                      motion_min_area=cfg.motion_min_area,
                                      hold_seconds=cfg.motion_hold,
                                      heartbeat=cfg.motion_heartbeat,
-                                     num_threads=cfg.threads)
+                                     num_threads=cfg.threads,
+                                     model_param=model_param, input_wh=model_wh)
         print(f"[main] Hybrid detector: motion-gated YOLO11 "
-              f"({YOLO_PARAM.split('/')[-2]}, {cfg.threads} threads)")
+              f"({model_label}, {cfg.threads} threads)")
 
     # IoU association against each track's velocity-predicted box: frame-to-frame
     # at ~25 fps this is a standard IoU tracker; across a stream stall the box is

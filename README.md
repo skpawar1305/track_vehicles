@@ -127,9 +127,9 @@ See `deploy/tracker.env.example`. Key knobs:
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `TRACKER_MODEL` | `yolo26n` | Model family (`models/<name>_ncnn_<imgsz>/`) |
-| `TRACKER_MODEL_IMGSZ` | `320x320` | Model input `HxW`, matched to the ROI aspect |
-| `TRACKER_INT8` | `1` | Use `model_int8.ncnn.param` |
+| `TRACKER_MODEL` | `yolo26n` | Model family (`models/<name>_ncnn_<imgsz>/`) — also `"model"` in `config.json` |
+| `TRACKER_MODEL_IMGSZ` | `320x320` | Model input `HxW`, matched to the ROI aspect — also `"model_imgsz"` in `config.json` |
+| `TRACKER_INT8` | `1` | Use `model_int8.ncnn.param` — also `"int8"` in `config.json` |
 | `TRACKER_THREADS` | `4` | ncnn inference threads (also settable as `"threads"` in `config.json`) |
 | `TRACKER_MOTION_HOLD` | `60` | Seconds motion keeps detection armed |
 | `TRACKER_MOTION_HEARTBEAT` | `3` | Idle YOLO cadence (s) |

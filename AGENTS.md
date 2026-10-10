@@ -222,10 +222,19 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   here; it's a kernel `step_wise` trip). The 320×320 model scales sublinearly, so
   `threads: 2` cuts heat/CPU with no meaningful loss of inf/s (measured ~24 inf/s at
   4 threads with production also running). `tracker.env` is root-owned, so read
-  `threads` from `config.json` (tracker-writable) instead. `run.py` also writes
+  `threads` (and `model`/`model_imgsz`/`int8`) from `config.json` (tracker-writable)
+  instead. `run.py` also writes
   `/tmp/tracker_stats.json` (`TRACKER_STATS_PATH`) every 10 s with track/detect fps,
   tracks, temp and session in/out — the service journal is **not** readable by the
   `tracker` user, so this file (or the DB) is how you see rates on-device.
+- **640×640 is ~9 fps on the Pi 5, not 25; pick the model via `config.json`.** The
+  detector input scales linearly with pixels, so 640 is 4× the 320 work: measured
+  `detect_fps` ~9 (vs ~24 at 320) at 2 threads, ~9 at 4 threads too — 4 threads just
+  runs hotter (75.5 °C). The tracker still runs at the frame rate the detector feeds
+  it (it coasts between detections), so ~9 fps is fine for this slow-dumper site but
+  cuts the live preview to ~9 fps. Select it without root via
+  `config.json` `{"model":"yolo26n","model_imgsz":"640x640","int8":true}` (the model
+  dir must exist); revert `model_imgsz` to `320x320` to go back.
 - `ncnn`'s wheel declares the GUI `opencv-python` (needs libxcb); first-boot.sh replaces
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads
