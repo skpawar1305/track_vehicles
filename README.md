@@ -142,7 +142,8 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_CAPTURE_PIPELINE` | – | GStreamer pipeline, e.g. Pi hardware `v4l2h264dec` |
 | `TRACKER_RTSP_RELAY` | `0` | Route capture through `RtspRelay` for SHA-256 Digest cameras |
 | `TRACKER_CAM2_URL` | – | Optional second camera substream shown raw on `/live` (no detection) |
-| `TRACKER_CAPTURE_URL` | derived | Full-res crossing still (ONVIF main-profile snapshot); substream fallback |
+| `TRACKER_CAPTURE_MAIN_STREAM` | `0` | Opt in to a main-profile ONVIF snapshot for evidence (perturbs the substream) |
+| `TRACKER_CAPTURE_URL` | derived | Full-res crossing still URL; used only when `TRACKER_CAPTURE_MAIN_STREAM=1` |
 | `TRACKER_CAPTURE_MAX_AGE` | `1.5` | Queue age (s) after which the main-stream fetch is skipped |
 | `TRACKER_DUP_IOU` | `0.6` | Same-vehicle IoU: detector cross-class NMS + crossing de-dupe |
 | `TRACKER_CROSS_DEDUP_S` | `1` | Window (s) for collapsing a duplicate crossing from a second track |
@@ -301,19 +302,20 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
   set it with `tools/set_camera_time.py`; prefer `--set-ntp pool.ntp.org` so it
   self-corrects. It uses ONVIF `Get/SetSystemDateAndTime` + `SetNTP` with
   WS-UsernameToken auth (pass the password via `TRACKER_CAM_PASSWORD`).
-- **Evidence captures come from the main stream.** Counting runs on the 640×360
-  substream, but at each crossing `run.py` fetches a full-resolution still from
-  the camera's main-profile ONVIF snapshot (`/onvif-http/snapshot?Profile_1`,
-  camera-side JPEG, SHA-256 Digest) — no extra Pi video decode — over a reused
-  `requests.Session` and with a queue-age guard (`TRACKER_CAPTURE_MAX_AGE`,
-  default 1.5 s). It falls back to the processed substream frame if the fetch
-  fails or is stale. URL/creds default to the stream URL's
-  (`TRACKER_CAPTURE_URL`/`_USER`/`_PASSWORD` to override). When the snapshot
-  succeeds **both** images are stored: `<id>.jpg` (full-res main stream) and
-  `<id>_sub.jpg` (the crossing substream frame, served at `/sub/<id>`). The
-  **thumbnail shown in the timeline is always the substream frame from the
-  crossing instant**, so it is not affected by the main-stream fetch delay; the
-  full-size main-stream still opens when you tap the thumbnail.
+- **Evidence captures come from the substream.** Counting and evidence both use
+  the 640×360 crossing substream frame: one `<id>.jpg` plus a thumbnail built
+  from the same frame, no `_sub` copy (`sub_path` NULL). This is deliberate —
+  requesting the camera's main-profile ONVIF snapshot
+  (`/onvif-http/snapshot?Profile_1`, camera-side JPEG, SHA-256 Digest) perturbs
+  the counting substream on the PT-NC120D3 (partial/blurry stills, occasional
+  substream glitch). The main-stream fetch is **opt-in** via
+  `TRACKER_CAPTURE_MAIN_STREAM=1`; when enabled it runs on the capture worker
+  (never the track loop), reuses a `requests.Session`, skips a stale still
+  (`TRACKER_CAPTURE_MAX_AGE`, default 1.5 s), and stores **both** `<id>.jpg`
+  (main stream) and `<id>_sub.jpg` (crossing frame, served at `/sub/<id>`).
+  URL/creds default to the stream URL's (`TRACKER_CAPTURE_URL`/`_USER`/`_PASSWORD`).
+  The **thumbnail shown in the timeline is always the substream frame from the
+  crossing instant**, so it shows the vehicle at the line regardless.
 - **One vehicle can arrive as two class-boxes — de-duplicated.** The INT8 detector
   sometimes fires two near-identical boxes for one vehicle with different winning
   classes (car/truck), which would otherwise become two tracks and two counts. A

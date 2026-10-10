@@ -96,19 +96,19 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   5h30m behind — local time mistaken for UTC). `tools/set_camera_time.py` reads/sets it over
   ONVIF (`SetSystemDateAndTime` + `SetNTP`, WS-UsernameToken; password via
   `TRACKER_CAM_PASSWORD`). Keep it on NTP so it self-corrects.
-- **Evidence captures use the main stream, counting uses the substream.** At each
-  crossing a worker thread fetches a full-res still from the camera's ONVIF
-  snapshot (`/onvif-http/snapshot?Profile_1`, camera-side JPEG, SHA-256 Digest) —
-  so no extra Pi decode. It reuses a `requests.Session` (keeps TLS + the digest
-  nonce alive) and falls back to the substream frame if the fetch fails, is stale
-  (`TRACKER_CAPTURE_MAX_AGE`, default 1.5 s in the queue), or the endpoint is
-  down. Keep the fetch off the main loop (a network call would stall tracking).
-  Two images are stored when the snapshot succeeds: `<id>.jpg` (full-res main
-  stream) and `<id>_sub.jpg` (the crossing substream frame). The **thumbnail is
-  always built from the substream frame at the crossing**, not from the (later)
-  main-stream JPEG, so the timeline shows the vehicle at the line; the main-stream
-  still is the full-size image behind the thumbnail and `/sub/<id>` serves the
-  detection frame.
+- **Evidence captures come from the substream, not the main stream.** Counting and
+  evidence both use the crossing substream frame now: one `<id>.jpg` (the crossing
+  frame) plus a thumbnail built from the same frame, no `_sub` copy (`sub_path`
+  NULL; the dashboard/`sync.py` tolerate it). This replaced the old default of
+  fetching the camera's main-profile ONVIF snapshot (`/onvif-http/snapshot?Profile_1`):
+  asking the camera for a main-profile still perturbs the counting substream on the
+  PT-NC120D3 (partial/blurry JPEGs, occasional substream glitch). The main-stream
+  fetch is now **opt-in** via `TRACKER_CAPTURE_MAIN_STREAM=1`; when enabled it still
+  runs on the capture worker (never the track loop), reuses a `requests.Session`
+  (keeps TLS + the digest nonce alive), skips a stale still (`TRACKER_CAPTURE_MAX_AGE`,
+  default 1.5 s in the queue), and writes both `<id>.jpg` (main stream) and
+  `<id>_sub.jpg` (crossing substream frame). The thumbnail is **always** built from
+  the crossing substream frame, so the timeline shows the vehicle at the line.
 - **One vehicle often produces two class-boxes — dedupe at the detector.** The
   INT8 model frequently fires two near-identical boxes with different winning
   classes (car+truck, bus+truck; IoU 0.76–0.93) for one vehicle. Per-class NMS
