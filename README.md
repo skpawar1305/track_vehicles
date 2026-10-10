@@ -191,7 +191,10 @@ Pages (each its own URL; `/` redirects to `/live`):
   (`live_wanted`); the page polls `/live.jpg` snapshots (self-recovering after restarts).
   A second camera can be shown raw alongside: with `CAM2=1` the Pi POSTs its substream to
   `/api/live2` (no detection) and the page polls `/live2.jpg` — again only while watched, so
-  an idle edge streams nothing.
+  an idle edge streams nothing. Left/right arrows on `/live` switch between Main and Camera 2
+  and **only the visible feed is polled** (the idle one's `live_wanted`/`live2_wanted` goes
+  stale within ~10 s, so the Pi stops uploading it — half the live data); it always opens on
+  Main.
 - **Timeline data:** the initial page ships only per-day IN/OUT counts (`GET /api/events`,
   polled every 8 s); a day's captures are fetched on demand from `GET /api/day?d=YYYY-MM-DD`
   and cached client-side, so first paint stays tiny and switching days is instant.

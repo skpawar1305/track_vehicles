@@ -334,7 +334,10 @@ function dashboard(view: "live" | "timeline", initialDay: string | null) {
   const init = initialDay && /^\d{4}-\d{2}-\d{2}$/.test(initialDay) ? initialDay : null;
   const J = (o: unknown) => JSON.stringify(o).replace(/</g, "\\u003c");
   const cam2Panel = CAM2
-    ? `<div class="feed" id="cam2"><div class="feedtag"><span class="d"></span>Camera 2</div><div class="player"><img id="snap_cam2" alt="camera 2"></div></div>`
+    ? `<div class="feed hidden" id="cam2"><div class="feedtag"><span class="d"></span>Camera 2</div><div class="player"><img id="snap_cam2" alt="camera 2"></div></div>`
+    : "";
+  const cam2Nav = CAM2
+    ? `<button class="nav prev" id="feedPrev" aria-label="Previous feed">&#8249;</button><button class="nav next" id="feedNext" aria-label="Next feed">&#8250;</button>`
     : "";
 
   return `<!doctype html><html lang="en"><head>
@@ -372,8 +375,13 @@ header{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.88);backdro
 .stat.out .lbl,.stat.out .num{color:var(--red)}
 main{max-width:920px;margin:0 auto;padding:14px}
 .view.hidden{display:none}
+#feedsWrap{position:relative}
 .feeds{display:grid;grid-template-columns:1fr;gap:14px}
-@media(min-width:760px){.feeds{grid-template-columns:1fr 1fr}}
+.feed.hidden{display:none}
+.nav{position:absolute;top:50%;transform:translateY(-50%);z-index:3;width:44px;height:44px;border-radius:50%;border:1px solid rgba(255,255,255,.35);background:rgba(15,23,42,.45);backdrop-filter:blur(4px);color:#fff;font-size:24px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.nav:hover{background:rgba(15,23,42,.72)}
+.nav.prev{left:10px}
+.nav.next{right:10px}
 .feed{position:relative}
 .player{position:relative;width:100%;aspect-ratio:16/9;background:#0b1220;border-radius:16px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow)}
 .player img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:translateZ(0)}
@@ -477,9 +485,12 @@ img{max-width:100%}
 </header>
 <main>
   <section id="v-live" class="view${view === "live" ? "" : " hidden"}">
-    <div class="feeds">
-      <div class="feed"><div class="feedtag"><span class="d"></span>Main · counting</div><div class="player"><img id="snap" alt="live"></div></div>
-      ${cam2Panel}
+    <div id="feedsWrap">
+      <div class="feeds">
+        <div class="feed" id="main"><div class="feedtag"><span class="d"></span>Main · counting</div><div class="player"><img id="snap" alt="live"></div></div>
+        ${cam2Panel}
+      </div>
+      ${cam2Nav}
     </div>
     <div class="sub">Tap the gear to edit the counting line / scan area</div>
   </section>
@@ -536,34 +547,43 @@ function refreshCounts(){fetch('/api/config',{cache:'no-store'})
   .catch(function(){});}
 refreshCounts();setInterval(refreshCounts,5000);
 
-S.onload=function(){dot.classList.add('on');ltxt.textContent='LIVE';};
-S.onerror=function(){dot.classList.remove('on');ltxt.textContent='idle';};
-// Resilient live view: poll /live.jpg snapshots instead of a one-shot MJPEG
-// connection (which never reconnects after a server restart). Polling also keeps
-// the server's live_wanted flag alive so the camera keeps uploading.
-var liveOn=false,pumpTimer=null,lastURL=null;
-var live2On=false,pumpTimer2=null,lastURL2=null;
-function liveTick(){
-  if(!liveOn)return;
-  fetch('/live.jpg',{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.blob();})
-    .then(function(b){var u=URL.createObjectURL(b);S.src=u;
-      if(lastURL)URL.revokeObjectURL(lastURL);lastURL=u;})
-    .catch(function(){});
+// Resilient live view: poll snapshots instead of a one-shot MJPEG connection
+// (which never reconnects after a server restart). Polling also keeps the
+// server's live_wanted / live2_wanted flags alive so the Pi keeps uploading.
+// Only ONE feed is pumped at a time: the idle feed's polls stop, its server
+// flag goes stale within ~10s, and the Pi stops sending that stream (half the
+// live data). Defaults to Main on every load; the arrows flip between feeds.
+var liveOn=false,pumpTimer=null,lastURL=null,lastURL2=null,activeFeed='main';
+function feedImg(k){return k==='cam2'?SC2:S;}
+function markLive(ok){dot.classList.toggle('on',!!ok);ltxt.textContent=ok?'LIVE':'idle';}
+function pump(k){
+  var img=feedImg(k);if(!img)return;
+  fetch(k==='cam2'?'/live2.jpg':'/live.jpg',{cache:'no-store'})
+    .then(function(r){if(!r.ok)throw 0;return r.blob();})
+    .then(function(b){var u=URL.createObjectURL(b);img.src=u;
+      if(k==='cam2'){if(lastURL2)URL.revokeObjectURL(lastURL2);lastURL2=u;}
+      else{if(lastURL)URL.revokeObjectURL(lastURL);lastURL=u;}
+      if(activeFeed===k)markLive(true);})
+    .catch(function(){if(activeFeed===k)markLive(false);});
 }
-// Camera 2 (raw substream, no detection) polls on a slower cadence; polling it
-// flips the server's live2_wanted so the Pi starts relaying.
-function live2Tick(){
-  if(!live2On||!SC2)return;
-  fetch('/live2.jpg',{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.blob();})
-    .then(function(b){var u=URL.createObjectURL(b);SC2.src=u;
-      if(lastURL2)URL.revokeObjectURL(lastURL2);lastURL2=u;})
-    .catch(function(){});
+function stopPump(){if(pumpTimer){clearInterval(pumpTimer);pumpTimer=null;}}
+function showFeed(k){
+  activeFeed=k;
+  var m=document.getElementById('main'),c=document.getElementById('cam2');
+  if(m)m.classList.toggle('hidden',k!=='main');
+  if(c)c.classList.toggle('hidden',k!=='cam2');
+  markLive(false);
+  if(liveOn){stopPump();pump(k);pumpTimer=setInterval(function(){pump(k);},k==='cam2'?500:250);}
 }
 function setLive(on){if(on===liveOn)return;liveOn=on;
-  if(on){liveTick();pumpTimer=setInterval(liveTick,250);
-    if(SC2){live2On=true;live2Tick();pumpTimer2=setInterval(live2Tick,500);}}
-  else{if(pumpTimer){clearInterval(pumpTimer);pumpTimer=null;}
-    live2On=false;if(pumpTimer2){clearInterval(pumpTimer2);pumpTimer2=null;}}}
+  if(on)showFeed(activeFeed);else stopPump();}
+var feedPrev=document.getElementById('feedPrev'),feedNext=document.getElementById('feedNext');
+function flipFeed(){showFeed(activeFeed==='cam2'?'main':'cam2');}
+if(feedPrev)feedPrev.onclick=flipFeed;
+if(feedNext)feedNext.onclick=flipFeed;
+document.addEventListener('keydown',function(e){
+  if(liveOn&&(e.key==='ArrowLeft'||e.key==='ArrowRight'))flipFeed();
+});
 var views=[].slice.call(document.querySelectorAll('.view'));
 // Each view is its own route (/live, /timeline); the nav links do a normal
 // navigation, so we only reveal the route's view and toggle the live pump.
@@ -572,7 +592,7 @@ function showTab(id){views.forEach(function(v){v.classList.toggle('hidden',v.id!
   window.scrollTo(0,0);}
 showTab({live:'v-live',timeline:'v-timeline'}[VIEW]||'v-live');
 var selDay=INIT||todayKey();   // today is open by default
-var dirFilter='in';
+var dirFilter='out';           // OUT tab is shown by default
 var dayCache={};
 function pad(n){return String(n).padStart(2,'0');}
 function ymd(y,m,d){return y+'-'+pad(m+1)+'-'+pad(d);}
@@ -638,7 +658,7 @@ function renderList(day, list, counts, headEl, gridEl){
   var ins=list.filter(function(e){return e.dir.toLowerCase()==='in';});
   var outs=list.filter(function(e){return e.dir.toLowerCase()==='out';});
   // IN / OUT as tabs so a busy day's captures aren't one enormous page.
-  if(dirFilter!=='out')dirFilter='in';
+  if(dirFilter!=='in')dirFilter='out';
   var seg=document.createElement('div');seg.className='seg';
   [['in','IN',ins.length],['out','OUT',outs.length]].forEach(function(t){
     var b=document.createElement('button');b.className=t[0]+(dirFilter===t[0]?' on':'');

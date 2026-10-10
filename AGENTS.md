@@ -128,7 +128,10 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   `TRACKER_CAM2_URL` (substream) + `CAM2=1` on the VPS render a second `/live`
   panel (`/api/live2`, `/live2.jpg`). The Pi opens the RTSP/relay session only while
   `live2_wanted` is set and tears it down ~5 s after the last viewer, so an idle edge
-  streams nothing. The main feed's `live_wanted` gate is the same idea.
+  streams nothing. The main feed's `live_wanted` gate is the same idea. On `/live`, left/right
+  arrows switch between Main and Camera 2 and **only the visible feed is polled** — the idle
+  feed's `*_wanted` flag goes stale within ~10 s, so the Pi stops uploading it (half the live
+  data). Always opens on Main; the header LIVE dot tracks the active feed.
 - **The `/timeline` view is counts-first; captures load per day on demand.** `GET /api/events`
   ships only per-day IN/OUT counts (polled every 8 s) and `GET /api/day?d=YYYY-MM-DD`
   returns one day's events (cached client-side). Don't re-embed the whole event list in the
