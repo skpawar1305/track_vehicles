@@ -26,7 +26,7 @@ import cv2
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from run import YoloNcnn, CentroidTracker, CrossingGate, CROSSING_NONE, CROSSING_IN
+from run import YoloNcnn, CentroidTracker, CrossingGate, CROSSING_NONE, CROSSING_IN, draw_gate_overlay
 
 
 def parse_line(s, w, h):
@@ -57,8 +57,8 @@ def main():
     ap.add_argument("--conf", type=float, default=0.30)
     ap.add_argument("--classes", default="2,5,7")
     ap.add_argument("--min-age", type=int, default=1)
-    ap.add_argument("--min-travel-frac", type=float, default=0.02)
     ap.add_argument("--cross-margin-frac", type=float, default=0.06)
+    ap.add_argument("--cross-rearm-frac", type=float, default=0.2)
     ap.add_argument("--iou-gate", type=float, default=0.2)
     ap.add_argument("--assoc-frac", type=float, default=0.2)
     ap.add_argument("--out", default="")
@@ -71,7 +71,9 @@ def main():
     classes = [int(c) for c in args.classes.split(",") if c != ""]
     det = YoloNcnn(conf_thresh=args.conf)
     tracker = CentroidTracker(iou_gate=args.iou_gate, assoc_frac=args.assoc_frac)
-    gate = CrossingGate(min_age=args.min_age, min_travel_frac=args.min_travel_frac)
+    gate = CrossingGate(min_age=args.min_age,
+                        margin_frac=args.cross_margin_frac,
+                        rearm_frac=args.cross_rearm_frac)
 
     cap = cv2.VideoCapture(args.file, cv2.CAP_FFMPEG)
     if not cap.isOpened():
@@ -95,7 +97,7 @@ def main():
         threading.Thread(target=sender, args=(q, args.live_url, headers, stop), daemon=True).start()
         print(f"[clip] pushing live -> {args.live_url} @ {args.push_fps} fps")
 
-    last_cross_info, gate_ids = {}, set()
+    gate_ids = set()
     events, c_in, c_out = [], 0, 0
     total, t0, last = 0, time.time(), -1.0
     play_t0 = time.time()
@@ -116,25 +118,18 @@ def main():
 
         raw = det.detect(frame, classes)
         objects = tracker.update(raw, w, h)
-        present = set()
-        for o in objects:
-            present.add(o.track_id)
-            gate.update_first(o.track_id, o.centroid)
+        present = {o.track_id for o in objects}
         gate.drop(gate_ids - present)
         gate_ids = present
 
         for obj in objects:
             if obj.age < args.min_age:
                 continue
-            crossing = gate.crossing(line, obj, margin=args.cross_margin_frac * h)
+            crossing = gate.crossing(line, obj, frame_h=h)
             if crossing == CROSSING_NONE:
                 continue
-            if not gate.allow(obj, now, h):
+            if not gate.allow(obj, h):
                 continue
-            info = last_cross_info.get(obj.track_id, {"frame": -60})
-            if total - info["frame"] < 15:
-                continue
-            last_cross_info[obj.track_id] = {"frame": total}
             d = "IN" if crossing == CROSSING_IN else "OUT"
             events.append((round(now, 1), obj.track_id, obj.label, d, obj.centroid))
             if crossing == CROSSING_IN:
@@ -169,6 +164,8 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (34, 197, 94), 1)
         cv2.putText(frame, f"IN {c_in}  OUT {c_out}", (10, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (59, 130, 246), 2)
+        # Gate debug overlay: hysteresis band + per-track re-arm anchor/state.
+        draw_gate_overlay(frame, line, objects, gate, h, args.cross_margin_frac * h, 1.0)
 
         if writer is not None:
             writer.write(frame)

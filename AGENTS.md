@@ -28,8 +28,8 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   persists everything already counted before exit. Skipping the network still
   during drain keeps it fast. Handle the signal, or `finally` never runs.
 - **No unbounded per-id state.** Track ids are never reused, so anything keyed by
-  `track_id` (`last_cross_info`, `CrossingGate.*`) must be dropped when the
-  tracker retires the id (`dead = gate_ids - present`), or it leaks for months.
+  `track_id` (`CrossingGate`, `recent_cross`) must be dropped when the tracker
+  retires the id (`dead = gate_ids - present`), or it leaks for months.
 - **A stream stall self-heals.** `TRACKER_READ_TIMEOUT` (15 s) forces a reconnect
   when no fresh frame arrives; an advancing container timestamp counts as alive,
   so a static scene is not treated as a stall. `stimeout`/`rw_timeout` bound
@@ -166,14 +166,27 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   tracked vehicle whose box changed shape/speed so IoU misses is still re-acquired by
   proximity. Sort key is `(tier, cost)`, so every IoU match beats any fallback and the best
   per-tier match is chosen (greedy; `bytetracker` is not used — only the dev harnesses).
-- **Crossing needs hysteresis, not a bare side-change — and only commit on accept.** A
-  low-confidence box near the line jitters across it and registers false IN/OUT.
-  `CrossingGate.crossing` commits each track to a side and requires the centroid to emerge >=
-  `TRACKER_CROSS_MARGIN_FRAC` of the frame height past the line, within the drawn segment. The
-  flip is only a *candidate*: `crossing()` records it and `allow()` commits it, so a candidate
-  the flicker gate rejects leaves the track on its old side. Flipping eagerly (the old bug)
-  armed the next micro-crossing in the opposite direction, so a parked/working machine on the
-  line alternated IN/OUT every cooldown.
+- **The crossing gate is exactly two rules: hysteresis + re-arm.** Earlier versions stacked
+  min-age + min-travel-from-birth + cooldown + a 15-frame refractory + this same re-arm; the
+  extra gates were either redundant or wrong (net-travel from *birth* never constrains a
+  reversal), so they were removed. What remains, in `CrossingGate`:
+  * **hysteresis:** `crossing()` commits a track to a side the first time it is seen and only
+    *candidates* a flip when the centroid emerges >= `TRACKER_CROSS_MARGIN_FRAC` of the frame
+    height past the line, within the drawn segment. `allow()` commits the candidate, so a
+    rejected candidate leaves the track on its old side. Flipping eagerly (the old bug) armed
+    the next micro-crossing in the opposite direction, so a parked/working machine on the line
+    alternated IN/OUT.
+  * **re-arm:** after a committed crossing the track must move `TRACKER_CROSS_REARM_FRAC`
+    (0.2) of the frame height *away from the crossing point* (`last_pt` + `rearm_remaining`,
+    checked in `allow()`) before another flip may commit. A vehicle that only drifts at the
+    line never re-arms; a real pass-through moves far enough that a later genuine return still
+    counts. `0` disables it (reproduces the bug).
+  `min_age` is the only other gate (both the run.py pre-filter and inside `allow()`); it is
+  not a travel/cooldown heuristic. `tools/test_crossing.py` asserts wobble=1, passthru=1,
+  true-return=2, and nudge(0.2)=1 / nudge(0.15)>1; don't regress.
+- **Don't confuse the re-arm distance with the margin.** `0.15` was too small on this site: a
+  slow dumper that overshot the line by ~55px re-armed and re-counted (`id6 out/in`, 12:54).
+  `0.2` (72px on 360p) covers that swing without missing real returns.
 - **The margin must exceed the detector's box-refit wobble.** A stationary vehicle parked
   *on* the line is the pathological case: YOLO re-fits the box as its parts move (an
   excavator's arm swings in/out of the `truck` box), which drags the centroid tens of px
@@ -203,6 +216,16 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   was written but *before* the event row — silently losing the crossing. ROI offsets are
   cast with `int()`, and `Store._json_safe` coerces any numpy value as a backstop. On the
   Pi, orphaned `captures/*.jpg` with no matching `events` row are the fingerprint.
+- **Pi 5 runs hot; the knob you can actually turn is `threads`.** `detect_loop`
+  runs ncnn unthrottled on `TRACKER_THREADS` cores (default 4) *plus* software H.264
+  decode, so the SoC parks at the `temp_limit` in `/boot/firmware/config.txt` (75 °C
+  here; it's a kernel `step_wise` trip). The 320×320 model scales sublinearly, so
+  `threads: 2` cuts heat/CPU with no meaningful loss of inf/s (measured ~24 inf/s at
+  4 threads with production also running). `tracker.env` is root-owned, so read
+  `threads` from `config.json` (tracker-writable) instead. `run.py` also writes
+  `/tmp/tracker_stats.json` (`TRACKER_STATS_PATH`) every 10 s with track/detect fps,
+  tracks, temp and session in/out — the service journal is **not** readable by the
+  `tracker` user, so this file (or the DB) is how you see rates on-device.
 - `ncnn`'s wheel declares the GUI `opencv-python` (needs libxcb); first-boot.sh replaces
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads

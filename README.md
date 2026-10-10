@@ -55,15 +55,18 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
   `TRACKER_ASSOC_MAX_FRAC`), so a track re-acquires a vehicle that moved far during a
   multi-second stall even if the predicted box missed. IoU always wins over the fallback.
   No appearance model; suits sparse traffic, not dense crowds.
-- **Crossing test (hysteresis).** Each track commits to a side of the line; a crossing
-  candidate is only *committed* when the flicker gate accepts it, and counts only once the
-  centroid emerges ≥ `TRACKER_CROSS_MARGIN_FRAC` of the frame height past the line on the
-  other side, with its projection inside the drawn segment. A rejected candidate leaves the
-  track on its old side, so a parked/working vehicle on the line can't alternate IN/OUT.
-  This rejects low-confidence boxes that jitter across the line while still catching fast
-  movers. A track must also be ≥ `TRACKER_MIN_TRACK_AGE` frames old, have travelled
-  ≥ `TRACKER_MIN_TRAVEL_FRAC` of the frame height, and respect a per-track cooldown
-  (`CrossingGate`).
+- **Crossing test (hysteresis + re-arm).** Two rules, in `CrossingGate`:
+  * *Hysteresis.* Each track commits to a side of the line; a flip is only a *candidate*
+    when the centroid emerges ≥ `TRACKER_CROSS_MARGIN_FRAC` of the frame height past the
+    line on the other side, with its projection inside the drawn segment. `allow()` commits
+    the candidate, so a rejected one leaves the track on its old side — a parked/working
+    vehicle on the line can't alternate IN/OUT, while fast movers are still caught.
+  * *Re-arm.* After a crossing commits, the track must move `TRACKER_CROSS_REARM_FRAC` of
+    the frame height **away from the crossing point** before another crossing may commit —
+    so a vehicle that only drifts back and forth at the line is counted once. Set it to `0`
+    to disable (the old behaviour, which double-counts a vehicle that backs up; see
+    `tools/test_crossing.py`).
+  `TRACKER_MIN_TRACK_AGE` is the only other gate (the run.py pre-filter and `allow()`).
 
 ## Layout
 
@@ -79,6 +82,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/quantize_int8.py` | INT8-quantize an ncnn model (`ncnn2table`/`ncnn2int8`) |
 | `tools/live_push.py` | Dev harness that mimics `run.py` from a laptop (can push to the VPS) |
 | `tools/test_clip.py` | Run the production tracker/crossing over a video clip and report IN/OUT |
+| `tools/test_crossing.py` | Synthetic crossing-gate regression + annotated re-arm demo video |
 | `tools/set_camera_time.py` | Read/set a camera clock over ONVIF (Manual or NTP) |
 | `web/` | Bun dashboard + ingest API (Drizzle + SQLite) |
 | `deploy/` | systemd units + env examples for the Pi |
@@ -126,12 +130,13 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_MODEL` | `yolo26n` | Model family (`models/<name>_ncnn_<imgsz>/`) |
 | `TRACKER_MODEL_IMGSZ` | `320x320` | Model input `HxW`, matched to the ROI aspect |
 | `TRACKER_INT8` | `1` | Use `model_int8.ncnn.param` |
-| `TRACKER_THREADS` | `4` | ncnn inference threads |
+| `TRACKER_THREADS` | `4` | ncnn inference threads (also settable as `"threads"` in `config.json`) |
 | `TRACKER_MOTION_HOLD` | `60` | Seconds motion keeps detection armed |
 | `TRACKER_MOTION_HEARTBEAT` | `3` | Idle YOLO cadence (s) |
 | `TRACKER_MOTION_SCALE` / `_MIN_AREA` | `0.5` / `12` | Motion-gate sensitivity |
-| `TRACKER_MIN_TRACK_AGE` / `_MIN_TRAVEL_FRAC` | `1` / `0.02` | Crossing gate |
+| `TRACKER_MIN_TRACK_AGE` | `1` | Frames a track must live before the crossing gate will count it |
 | `TRACKER_CROSS_MARGIN_FRAC` | `0.06` | Hysteresis past the line (fraction of frame height) |
+| `TRACKER_CROSS_REARM_FRAC` | `0.2` | Distance a track must move from its last crossing before it can count again (`0` disables) |
 | `TRACKER_IOU_GATE` | `0.2` | Min IoU with the velocity-predicted box to match a detection |
 | `TRACKER_ASSOC_FRAC` | `0.2` | Fallback centroid gate = fraction of frame width |
 | `TRACKER_ASSOC_GAP_FRAC` | `0.5` | Extra fallback gate per second of stream gap |
@@ -343,6 +348,22 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
   two-tier tracker — IoU on the velocity-predicted box (`TRACKER_IOU_GATE`), with a
   gap-widened centroid-distance fallback — so the vehicle stays matchable across a
   multi-second stall.
+- **A vehicle that backs up at the line is counted once.** The gate is two rules —
+  hysteresis + re-arm. Hysteresis alone isn't enough: a vehicle that crosses, then
+  drifts back and forth over the line keeps re-committing a side flip. `CrossingGate`
+  therefore re-anchors on each committed crossing and requires the track to move
+  `TRACKER_CROSS_REARM_FRAC` (0.2) of the frame height away from that point before
+  another crossing can commit (0.15 was too small — a slow dumper that overshot ~55 px
+  re-armed and re-counted). A genuine pass-through re-arms and its later OUT still
+  counts. The older `min_travel_frac`/cooldown/15-frame gates were removed: they were
+  redundant with (or weaker than) this rule. `tools/test_crossing.py` asserts wobble,
+  passthrough, true-return and a nudge-return case, and renders the band/anchor/state.
+- **Thermals / CPU.** `detect_loop` runs ncnn unthrottled on `TRACKER_THREADS` cores
+  (default 4) plus software H.264 decode, so the Pi 5 sits near the `temp_limit` in
+  `/boot/firmware/config.txt`. Lower `threads` (via `config.json`) to cut heat — a
+  320×320 model scales sublinearly, so 2 threads keeps plenty of inf/s. Read live
+  rates/temp from `/tmp/tracker_stats.json` (`TRACKER_STATS_PATH`); `run.py` writes it
+  every 10 s since the service journal isn't readable by the `tracker` user.
 - **Offline-first, and unsynced rows are never pruned.** Events and images queue
   locally until `sync.py` gets a 2xx from the VPS, which is the only point a local
   file is deleted. `store.prune` only removes `synced=1` rows older than

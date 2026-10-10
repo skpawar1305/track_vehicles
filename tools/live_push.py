@@ -199,7 +199,7 @@ def main():
                      args=(det, det_classes, latest, cam, cam_lock, shared, stop), daemon=True).start()
 
     prev, ages = {}, {}
-    gate = CrossingGate(min_age=2, min_travel_frac=0.02)
+    gate = CrossingGate(min_age=2)
     debug = os.environ.get("TRACKER_DEBUG") == "1"
     last_seq = -1
     last_track = 0.0
@@ -260,7 +260,6 @@ def main():
                                          int(cls_id), float(score), cen, prev.get(tid), ages.get(tid, 0)))
                 prev[tid] = cen
                 ages[tid] = ages.get(tid, 0) + 1
-                gate.update_first(tid, cen)
 
             if debug and objects:
                 print("[dbg] " + ", ".join(
@@ -271,13 +270,13 @@ def main():
             for obj in objects:
                 if not (line_px and obj.age >= 2):
                     continue
-                crossing = gate.crossing(line_px, obj, flip=flip, margin=0.06 * fh)
+                crossing = gate.crossing(line_px, obj, flip=flip, frame_h=fh)
                 if debug:
                     print(f"[dbg] #{obj.track_id} {obj.label} cross={crossing} "
                           f"age={obj.age} side={gate.side.get(obj.track_id)}")
                 if crossing == CROSSING_NONE:
                     continue
-                if not gate.allow(obj, now, fh):
+                if not gate.allow(obj, fh):
                     continue
                 direction = "in" if crossing == CROSSING_IN else "out"
                 # Raw frame (no overlay) as training data

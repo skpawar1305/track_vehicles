@@ -173,11 +173,20 @@ class Config:
         self.motion_hold = float(os.environ.get("TRACKER_MOTION_HOLD", "60"))
         self.motion_heartbeat = float(os.environ.get("TRACKER_MOTION_HEARTBEAT", "3"))
         self.min_track_age = int(os.environ.get("TRACKER_MIN_TRACK_AGE", "1"))
-        self.min_travel_frac = float(os.environ.get("TRACKER_MIN_TRAVEL_FRAC", "0.02"))
         # Hysteresis past the line (fraction of frame height) to reject jitter.
         # Wide enough that a stationary/working vehicle parked on the line (its
         # bbox centroid wandering as the detector re-fits it) can't flip sides.
         self.cross_margin_frac = float(os.environ.get("TRACKER_CROSS_MARGIN_FRAC", "0.06"))
+        # After a crossing commits, the track must move this fraction of the
+        # frame height *away from the crossing point* before another crossing
+        # can commit. A vehicle that only drifts back and forth at the line
+        # never re-arms, so it is counted once (see CrossingGate).
+        self.cross_rearm_frac = float(os.environ.get("TRACKER_CROSS_REARM_FRAC", "0.2"))
+        # ncnn inference threads; also read from config.json so it can be lowered
+        # on-device (heat/CPU) without editing the root-owned tracker.env.
+        self.threads = int(os.environ.get("TRACKER_THREADS", str(NUM_THREADS)))
+        # Debug overlay (hysteresis band + per-track re-arm state) on the live feed.
+        self.debug_overlay = os.environ.get("TRACKER_DEBUG_OVERLAY", "0") == "1"
         self.running = True
         self._reconnect = False
         self.captures = []
@@ -228,6 +237,10 @@ class Config:
                 self.enabled_classes = _counting_classes(
                     data.get("enabled_classes", DEFAULT_ENABLED_CLASSES))
                 self.relay = bool(data.get("relay", self.relay))
+                self.threads = int(data.get("threads", self.threads))
+                self.debug_overlay = bool(data.get("debug_overlay", self.debug_overlay))
+                self.cross_rearm_frac = float(
+                    data.get("cross_rearm_frac", self.cross_rearm_frac))
                 self.cam2_url = data.get("cam2_url", self.cam2_url)
                 self.capture_url = data.get("capture_url", self.capture_url)
             self._derive_capture()
@@ -258,6 +271,9 @@ class Config:
                     "conf_thresh": self.conf_thresh, "flip_sides": self.flip_sides,
                     "capture_dir": self.capture_dir, "max_captures": self.max_captures,
                     "enabled_classes": self.enabled_classes, "relay": self.relay,
+                    "threads": self.threads,
+                    "debug_overlay": self.debug_overlay,
+                    "cross_rearm_frac": self.cross_rearm_frac,
                     "cam2_url": self.cam2_url, "capture_url": self.capture_url}
         with open(CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
@@ -368,51 +384,52 @@ def detect_crossing(line, old_centroid, new_centroid, flip=False):
     return CROSSING_NONE
 
 class CrossingGate:
-    """Suppresses spurious crossings (shadow/lighting/compression flicker).
+    """Committed-side line crossing with hysteresis and a single re-arm guard.
 
-    A track must have existed for `min_age` frames and travelled at least
-    `min_travel_frac` of the frame height (net displacement from where it was
-    first seen) before a crossing is accepted, plus a per-track cooldown.
+    The whole rule set is two gates:
+
+    * **hysteresis** — a track commits to a side the first time it is seen; a
+      flip is only a *candidate* when the centroid lands ``margin_frac`` of the
+      frame height past the line, with the crossing point inside the drawn
+      segment. ``crossing()`` records the candidate and ``allow()`` commits it,
+      so a rejected candidate leaves the track on its old side (the old
+      eager-flip bug turned a parked machine on the line into alternating
+      IN/OUT events).
+    * **re-arm** — after a committed crossing the track must move ``rearm_frac``
+      of the frame height away from where it crossed before another flip may
+      commit. A vehicle that only drifts back and forth at the line never
+      re-arms and is counted once; a real pass-through moves far enough that a
+      later genuine return still counts.
     """
 
-    def __init__(self, min_age=4, min_travel_frac=0.04, cooldown=2.0):
+    def __init__(self, min_age=4, margin_frac=0.06, rearm_frac=0.2,
+                 seg_tol=0.02):
         self.min_age = min_age
-        self.min_travel_frac = min_travel_frac
-        self.cooldown = cooldown
-        self.first = {}
-        self.last_cross = {}
+        self.margin_frac = margin_frac
+        self.rearm_frac = rearm_frac
+        self.seg_tol = seg_tol
+        self.last_pt = {}     # tid -> centroid where the last crossing committed
         self.side = {}        # tid -> last committed side (+1/-1) outside the band
         self._pending = {}    # tid -> candidate side, committed only by `allow`
 
-    def update_first(self, tid, cen):
-        if tid not in self.first:
-            self.first[tid] = (float(cen[0]), float(cen[1]))
-
     def drop(self, dead_ids):
         for tid in dead_ids:
-            self.first.pop(tid, None)
-            self.last_cross.pop(tid, None)
+            self.last_pt.pop(tid, None)
             self.side.pop(tid, None)
             self._pending.pop(tid, None)
 
-    def crossing(self, line, obj, flip=False, margin=0.0, seg_tol=0.02):
-        """Stateful line-crossing test with hysteresis.
+    def crossing(self, line, obj, flip=False, frame_h=360):
+        """Stateful line-crossing test with hysteresis. Returns NONE/IN/OUT.
 
-        Returns CROSSING_NONE/IN/OUT. A crossing is registered only when the
-        object's centroid moves from one committed side of the line to the
-        other, landing at least `margin` px past it, with the crossing point
-        inside the drawn segment. Committing to a side means a low-confidence
-        box whose centroid jitters across the line by a pixel or two never
-        registers a crossing.
-
-        The flip is only a *candidate* here: `allow` commits it when the
-        flicker gate passes. Doing it this way (instead of flipping eagerly)
-        means a candidate that `allow` rejects leaves the track committed to
-        its old side, so the next micro-crossing cannot be counted in the
-        opposite direction — the bug that turned a parked/working vehicle on
-        the line into spurious IN/OUT events.
+        A crossing is registered only when the object's centroid moves from one
+        committed side of the line to the other, landing at least
+        ``margin_frac * frame_h`` px past it, with the crossing point inside the
+        drawn segment. Committing to a side means a low-confidence box whose
+        centroid jitters across the line by a pixel or two never registers a
+        crossing.
         """
         dist, t = line_geometry(line, obj.centroid)
+        margin = self.margin_frac * frame_h
         if dist is None or abs(dist) < margin:
             # Not a crossing. Inside the band is also "came back to the line",
             # so any pending candidate is abandoned.
@@ -424,7 +441,7 @@ class CrossingGate:
             self.side[obj.track_id] = new_side
             self._pending.pop(obj.track_id, None)
             return CROSSING_NONE
-        if t < -seg_tol or t > 1 + seg_tol:
+        if t < -self.seg_tol or t > 1 + self.seg_tol:
             # Crossed the infinite line, but outside the drawn segment: re-arm
             # without counting.
             self.side[obj.track_id] = new_side
@@ -435,21 +452,28 @@ class CrossingGate:
             return CROSSING_OUT if new_side == 1 else CROSSING_IN
         return CROSSING_IN if new_side == 1 else CROSSING_OUT
 
-    def allow(self, obj, now, frame_h):
+    def allow(self, obj, frame_h):
         if obj.age < self.min_age:
             return False
-        fx, fy = self.first.get(obj.track_id, obj.centroid)
-        travel = ((obj.centroid[0] - fx) ** 2 + (obj.centroid[1] - fy) ** 2) ** 0.5
-        if travel < self.min_travel_frac * frame_h:
+        # Re-arm: after a crossing the track must get `rearm_frac` of the frame
+        # height away from where it crossed before another crossing may commit.
+        if self.rearm_remaining(obj, frame_h):
             return False
-        if now - self.last_cross.get(obj.track_id, 0.0) < self.cooldown:
-            return False
-        self.last_cross[obj.track_id] = now
-        # Accepted: commit the candidate side flip.
+        # Accepted: commit the candidate side flip and re-anchor the gate here.
         new_side = self._pending.pop(obj.track_id, None)
         if new_side is not None:
             self.side[obj.track_id] = new_side
+        self.last_pt[obj.track_id] = (float(obj.centroid[0]), float(obj.centroid[1]))
         return True
+
+    def rearm_remaining(self, obj, frame_h):
+        """Px the track still has to move from its last crossing before it can
+        cross again (0.0 once re-armed; None if it has not crossed yet)."""
+        lp = self.last_pt.get(obj.track_id)
+        if lp is None:
+            return None
+        d = ((obj.centroid[0] - lp[0]) ** 2 + (obj.centroid[1] - lp[1]) ** 2) ** 0.5
+        return max(0.0, self.rearm_frac * frame_h - d)
 
 # ── Capture Manager ───────────────────────────────────────────────────
 class CaptureManager:
@@ -879,13 +903,14 @@ class HybridDetector:
     """
 
     def __init__(self, conf_thresh=0.30, motion_scale=0.5, motion_min_area=12,
-                 margin=0.08, hold_seconds=None, heartbeat=None):
+                 margin=0.08, hold_seconds=None, heartbeat=None, num_threads=None):
         if hold_seconds is None:
             hold_seconds = float(os.environ.get("TRACKER_MOTION_HOLD", "60"))
         if heartbeat is None:
             heartbeat = float(os.environ.get("TRACKER_MOTION_HEARTBEAT", "3"))
         self.motion = MotionDetector(scale=motion_scale, min_area=motion_min_area)
-        self.yolo = YoloNcnn(conf_thresh=conf_thresh)
+        self.yolo = YoloNcnn(conf_thresh=conf_thresh,
+                             num_threads=NUM_THREADS if num_threads is None else num_threads)
         self.margin = margin
         self.hold = hold_seconds
         self.heartbeat = heartbeat
@@ -1378,7 +1403,82 @@ def reader_loop(cfg, latest):
 LIVE_HEIGHT  = int(os.environ.get("TRACKER_LIVE_HEIGHT", "360"))
 LIVE_QUALITY = int(os.environ.get("TRACKER_LIVE_QUALITY", "65"))
 
-def annotate_live(frame, line, objects, counts, target_h=LIVE_HEIGHT, roi=None, flip=False):
+STATS_PATH = os.environ.get("TRACKER_STATS_PATH", "/tmp/tracker_stats.json")
+
+
+def _cpu_temp():
+    """SoC temperature in °C, or nan if unavailable."""
+    try:
+        return int(open("/sys/class/thermal/thermal_zone0/temp").read().strip()) / 1000.0
+    except (OSError, ValueError):
+        return float("nan")
+
+
+def _write_stats(payload):
+    """Atomic JSON side-channel so the edge's rates/temp are readable remotely
+    (the service journal isn't). Best-effort: never disturb the counting loop."""
+    try:
+        data = dict(payload)
+        data["ts"] = datetime.now(timezone.utc).isoformat()
+        data["pid"] = os.getpid()
+        tmp = STATS_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, STATS_PATH)
+    except Exception as e:
+        _log_throttled("stats", f"[stats] write failed: {e}", every=60)
+
+
+def _post_stats(cfg, payload):
+    """Push the same stats to the VPS so the dashboard header can show them,
+    instead of burning text into the live frame."""
+    import requests
+    try:
+        requests.post(cfg.stats_url, json=payload,
+                      headers={"Authorization": f"Bearer {cfg.token}"}, timeout=5)
+    except Exception as e:
+        _log_throttled("stats_post", f"[stats] post failed: {e}", every=60)
+
+
+def draw_gate_overlay(img, line, objects, gate, frame_h, margin_px, scale=1.0):
+    """Debug overlay for the crossing gate.
+
+    Draws the two hysteresis band edges (±``margin_px`` around the line) and,
+    per track, the re-arm anchor (the point of its last crossing) plus a circle
+    of radius ``rearm_frac * frame_h``. The dot at the centroid is green when the
+    track is re-armed (eligible to count) and amber while it still has to move
+    away from the anchor before it can count again.
+    """
+    if line:
+        x1, y1, x2, y2 = line
+        dx, dy = x2 - x1, y2 - y1
+        L = (dx * dx + dy * dy) ** 0.5 or 1.0
+        nx, ny = -dy / L, dx / L
+        for sgn in (1, -1):
+            a = (int((x1 + nx * margin_px * sgn) * scale), int((y1 + ny * margin_px * sgn) * scale))
+            b = (int((x2 + nx * margin_px * sgn) * scale), int((y2 + ny * margin_px * sgn) * scale))
+            cv2.line(img, a, b, (170, 170, 170), 1, cv2.LINE_AA)
+    if gate is None:
+        return img
+    for obj in objects:
+        remaining = gate.rearm_remaining(obj, frame_h)
+        armed = not remaining            # None (never crossed) or 0.0 => armed
+        col = (34, 197, 94) if armed else (0, 165, 255)
+        lp = gate.last_pt.get(obj.track_id)
+        if lp is not None:
+            ax, ay = int(lp[0] * scale), int(lp[1] * scale)
+            r = max(2, int(gate.rearm_frac * frame_h * scale))
+            cv2.circle(img, (ax, ay), r, col, 1, cv2.LINE_AA)
+            cv2.circle(img, (ax, ay), 3, col, -1, cv2.LINE_AA)
+        cx, cy = int(obj.centroid[0] * scale), int(obj.centroid[1] * scale)
+        cv2.circle(img, (cx, cy), 3, col, -1, cv2.LINE_AA)
+        cv2.putText(img, "ARM" if armed else f"rearm {remaining:.0f}",
+                    (cx + 5, cy - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, col, 1, cv2.LINE_AA)
+    return img
+
+
+def annotate_live(frame, line, objects, counts, target_h=LIVE_HEIGHT, roi=None, flip=False,
+                  gate=None, margin_px=0.0):
     """Downscale to the target height and draw a crisp overlay (boxes scaled to match)."""
     h, w = frame.shape[:2]
     s = target_h / h if h > target_h else 1.0
@@ -1408,6 +1508,8 @@ def annotate_live(frame, line, objects, counts, target_h=LIVE_HEIGHT, roi=None, 
         cv2.rectangle(img, (x1, y1), (x2, y2), (34, 197, 94), 2)
         cv2.putText(img, f"{obj.label} #{obj.track_id}", (x1, max(12, y1 - 4)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (34, 197, 94), 1, cv2.LINE_AA)
+    if gate is not None:
+        draw_gate_overlay(img, line, objects, gate, h, margin_px, s)
     return img
 
 def live_loop(url, token, live_q, cfg):
@@ -1673,16 +1775,17 @@ def main():
         detector    = MotionDetector(scale=cfg.motion_scale, min_area=cfg.motion_min_area)
         print(f"[main] Motion detector (scale={cfg.motion_scale}, min_area={cfg.motion_min_area})")
     elif cfg.detector == "yolo":
-        detector    = YoloNcnn(conf_thresh=cfg.conf_thresh)
-        print(f"[main] YOLO11 ncnn loaded ({YOLO_PARAM.split('/')[-2]}, {NUM_THREADS} threads)")
+        detector    = YoloNcnn(conf_thresh=cfg.conf_thresh, num_threads=cfg.threads)
+        print(f"[main] YOLO11 ncnn loaded ({YOLO_PARAM.split('/')[-2]}, {cfg.threads} threads)")
     else:
         detector    = HybridDetector(conf_thresh=cfg.conf_thresh,
                                      motion_scale=cfg.motion_scale,
                                      motion_min_area=cfg.motion_min_area,
                                      hold_seconds=cfg.motion_hold,
-                                     heartbeat=cfg.motion_heartbeat)
+                                     heartbeat=cfg.motion_heartbeat,
+                                     num_threads=cfg.threads)
         print(f"[main] Hybrid detector: motion-gated YOLO11 "
-              f"({YOLO_PARAM.split('/')[-2]}, {NUM_THREADS} threads)")
+              f"({YOLO_PARAM.split('/')[-2]}, {cfg.threads} threads)")
 
     # IoU association against each track's velocity-predicted box: frame-to-frame
     # at ~25 fps this is a standard IoU tracker; across a stream stall the box is
@@ -1701,13 +1804,14 @@ def main():
     # Offline-first event store (SQLite); survives restarts and outages
     store = Store(os.environ.get("TRACKER_DB_PATH", "events.db"))
 
-    last_cross_info = {}
     # Recent crossings, to collapse one vehicle counted twice (two tracks from
     # two class-boxes) into a single event.
     recent_cross    = []
     gate_ids        = set()
+    last_stats_str  = ""
     cross_gate      = CrossingGate(min_age=cfg.min_track_age,
-                                   min_travel_frac=cfg.min_travel_frac)
+                                   margin_frac=cfg.cross_margin_frac,
+                                   rearm_frac=cfg.cross_rearm_frac)
 
     latest = LatestFrame()
     shared = {"dets": [], "counter": 0, "lock": threading.Lock()}
@@ -1735,6 +1839,9 @@ def main():
     live_url   = os.environ.get("TRACKER_LIVE_URL", "")
     live_token = os.environ.get("TRACKER_TOKEN", "")
     live_q     = Queue(maxsize=1)
+    cfg.stats_url = os.environ.get("TRACKER_STATS_URL") or (
+        live_url.replace("/api/live", "/api/stats")
+        if live_url.endswith("/api/live") else "")
     if live_url:
         _HEARTBEAT["live"] = time.time()
         threading.Thread(target=live_loop, args=(live_url, live_token, live_q, cfg),
@@ -1828,18 +1935,13 @@ def main():
                 # just coasts tracks between detector updates).
                 objects = tracker.update(raw_detections, w, h, now=now_t)
 
-                # Flicker gate keeps its "first seen" position per live track id.
-                present = set()
-                for obj in objects:
-                    present.add(obj.track_id)
-                    cross_gate.update_first(obj.track_id, obj.centroid)
-                # Track ids are never reused, so drop per-id state for tracks the
-                # tracker just retired — otherwise last_cross_info grows without
-                # bound for the life of the process (a slow leak over months).
+                # Track ids are never reused, so drop per-id gate state for
+                # tracks the tracker just retired — otherwise the gate's
+                # per-track dicts grow without bound for the life of the process
+                # (a slow leak over months).
+                present = {obj.track_id for obj in objects}
                 dead = gate_ids - present
                 cross_gate.drop(dead)
-                for tid in dead:
-                    last_cross_info.pop(tid, None)
                 gate_ids = present
 
             # Push annotated frame to the VPS live feed (~5 fps, non-blocking).
@@ -1851,7 +1953,9 @@ def main():
                 last_live = now_t
                 try:
                     ann = annotate_live(frame, line_px, objects, {"in": c_in, "out": c_out},
-                                        roi=roi_px, flip=cfg.flip_sides)
+                                        roi=roi_px, flip=cfg.flip_sides,
+                                        gate=(cross_gate if cfg.debug_overlay else None),
+                                        margin_px=cfg.cross_margin_frac * h)
                     ok, jpeg = cv2.imencode('.jpg', ann, [cv2.IMWRITE_JPEG_QUALITY, LIVE_QUALITY])
                     if ok:
                         try: live_q.put_nowait(jpeg.tobytes())
@@ -1864,8 +1968,22 @@ def main():
                 el = time.time() - stat_t
                 with shared["lock"]:
                     dc = shared["counter"]
-                print(f"[stat] track={(total_frames - stat_frames) / el:.1f} fps  "
-                      f"detect={(dc - stat_dets) / el:.1f} fps  tracks={len(objects)}")
+                track_fps = (total_frames - stat_frames) / el
+                detect_fps = (dc - stat_dets) / el
+                temp_c = _cpu_temp()
+                print(f"[stat] track={track_fps:.1f} fps  detect={detect_fps:.1f} fps  "
+                      f"tracks={len(objects)}  temp={temp_c:.1f}C")
+                payload = {
+                    "track_fps": round(float(track_fps), 1),
+                    "detect_fps": round(float(detect_fps), 1),
+                    "tracks": int(len(objects)),
+                    "temp_c": None if temp_c != temp_c else round(float(temp_c), 1),
+                    "in": int(c_in), "out": int(c_out),
+                }
+                _write_stats(payload)
+                if cfg.stats_url:
+                    threading.Thread(target=_post_stats, args=(cfg, payload),
+                                     daemon=True).start()
                 stat_t, stat_frames, stat_dets = time.time(), total_frames, dc
 
             if not fresh:
@@ -1879,17 +1997,15 @@ def main():
                               f"c={obj.centroid} (wait)")
                     continue
                 crossing = cross_gate.crossing(line_px, obj, flip=cfg.flip_sides,
-                                               margin=cfg.cross_margin_frac * h)
+                                               frame_h=h)
                 if debug:
                     print(f"[dbg] #{obj.track_id} {obj.label} age={obj.age} c={obj.centroid} "
                           f"side={cross_gate.side.get(obj.track_id)} cross={crossing}")
                 if crossing == CROSSING_NONE:
                     continue
-                # Reject flicker: real age + net travel + cooldown
-                if not cross_gate.allow(obj, now_t, h):
-                    continue
-                info = last_cross_info.get(obj.track_id, {'frame': -60, 'dir': None})
-                if total_frames - info['frame'] < 15:
+                # Commit the candidate flip only if the re-arm/hysteresis gate
+                # accepts it (a rejected candidate leaves the side unchanged).
+                if not cross_gate.allow(obj, h):
                     continue
                 direction = 'IN' if crossing == CROSSING_IN else 'OUT'
                 # Safety net: if another track crossed the same way here moments
@@ -1904,7 +2020,6 @@ def main():
                                   f"{direction} suppressed")
                         continue
                     recent_cross.append((now_t, crossing, tuple(obj.bbox)))
-                last_cross_info[obj.track_id] = {'frame': total_frames, 'dir': crossing}
                 # Hand the capture to a worker: it persists the crossing from the
                 # substream frame (and any opt-in main-stream still) without
                 # stalling the track loop.

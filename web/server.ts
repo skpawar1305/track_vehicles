@@ -135,6 +135,11 @@ let liveSeq = 0;
 let liveViewers = 0;   // active /live.mjpg clients
 let liveJpgAt = 0;     // last /live.jpg request (setup editor snapshot)
 
+// Edge runtime telemetry (Pi POSTs /api/stats): detect/track fps, temp. Shown
+// in the dashboard header — the edge no longer burns text into the video frame.
+let edgeStats: Record<string, unknown> | null = null;
+let edgeStatsAt = 0;
+
 // Camera 2: raw substream relayed by the Pi with no detection (optional).
 let live2Frame: Uint8Array | null = null;
 let live2At = 0;
@@ -362,6 +367,8 @@ header{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.88);backdro
 .live{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--muted);background:#f1f5f9;border:1px solid var(--line);border-radius:999px;padding:6px 11px;white-space:nowrap}
 .dot{width:8px;height:8px;border-radius:50%;background:#cbd5e1}
 .dot.on{background:var(--green);box-shadow:0 0 0 4px rgba(22,163,74,.14)}
+.edge{margin-left:8px;font-size:12px;font-weight:700;color:var(--muted);background:#f1f5f9;border:1px solid var(--line);border-radius:999px;padding:6px 11px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.edge .e{color:var(--green)}
 .icon{width:40px;height:40px;border:1px solid var(--line);background:#fff;border-radius:12px;font-size:17px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s}
 .icon:hover{background:#f8fafc}
 .icon:disabled{opacity:.35;cursor:default}
@@ -475,13 +482,14 @@ img{max-width:100%}
       <div><div class="title">Vehicle Tracker</div><div class="subt">${view === "live" ? "Live view" : "Capture timeline"}</div></div>
     </div>
     <div class="live"><span class="dot" id="dot"></span><span id="ltxt">…</span></div>
+    <span class="edge hidden" id="edge"></span>
     <button class="icon" id="setupBtn" title="Setup">&#9881;</button>
   </div>
   <div class="todaylbl" id="todayLbl">Today</div>
-  <div class="stats">
+  ${view === "live" ? `<div class="stats">
     <div class="stat in"><span class="lbl">IN</span><span class="num" id="sIn">0</span></div>
     <div class="stat out"><span class="lbl">OUT</span><span class="num" id="sOut">0</span></div>
-  </div>
+  </div>` : ""}
 </header>
 <main>
   <section id="v-live" class="view${view === "live" ? "" : " hidden"}">
@@ -531,8 +539,12 @@ const VIEW=${J(view)};
 var S=document.getElementById('snap'),dot=document.getElementById('dot'),ltxt=document.getElementById('ltxt');
 var SC2=document.getElementById('snap_cam2');
 var tk=todayKey(),tc=DAYS[tk]||{};
-document.getElementById('sIn').textContent=tc['in']||0;
-document.getElementById('sOut').textContent=tc.out||0;
+var sInEl=document.getElementById('sIn'),sOutEl=document.getElementById('sOut');
+function setTodayCounts(i,o){
+  if(sInEl)sInEl.textContent=i||0;
+  if(sOutEl)sOutEl.textContent=o||0;
+}
+setTodayCounts(tc['in'],tc.out);
 function clock(){var n=new Date();document.getElementById('todayLbl').textContent='Today · '+
   n.toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata',weekday:'short',day:'numeric',month:'short'})+' · '+
   n.toLocaleTimeString('en-GB',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit'})+' IST';}
@@ -541,9 +553,16 @@ clock();setInterval(clock,1000);
 function refreshCounts(){fetch('/api/config',{cache:'no-store'})
   .then(function(r){return r.ok?r.json():null;})
   .then(function(d){if(!d||!d.today)return;
-    document.getElementById('sIn').textContent=d.today['in']||0;
-    document.getElementById('sOut').textContent=d.today.out||0;
-    if(DAYS[d.today.date]){DAYS[d.today.date]['in']=d.today['in'];DAYS[d.today.date].out=d.today.out;}})
+    setTodayCounts(d.today['in'],d.today.out);
+    if(DAYS[d.today.date]){DAYS[d.today.date]['in']=d.today['in'];DAYS[d.today.date].out=d.today.out;}
+    var e=document.getElementById('edge');
+    if(e){var s=d.edge;
+      if(s&&(d.edge_age==null||d.edge_age<30)){
+        e.innerHTML='<span class="e">'+(s.detect_fps!=null?Math.round(s.detect_fps):'?')+'</span> fps'+
+          (s.temp_c!=null?' · '+Math.round(s.temp_c)+'\u00b0C':'');
+        e.classList.remove('hidden');
+      }else{e.classList.add('hidden');}}
+  })
   .catch(function(){});}
 refreshCounts();setInterval(refreshCounts,5000);
 
@@ -646,8 +665,7 @@ function dayLabel(k){
 }
 // Render one day's captures (IN/OUT tabs) into the timeline's list area.
 function renderList(day, list, counts, headEl, gridEl){
-  headEl.innerHTML='<span class="d">'+dayLabel(day)+'</span>'+
-    '<span class="c"><b style="color:var(--green)">'+counts['in']+' IN</b> &middot; <b style="color:var(--red)">'+counts.out+' OUT</b></span>';
+  headEl.innerHTML='<span class="d">'+dayLabel(day)+'</span>';
   function card(e){
     var sub=e.sub?'<a class="figsub" href="/sub/'+encodeURIComponent(e.id)+'" target="_blank" title="Detection frame (substream)">line</a>':'';
     return '<figure><a href="/img/'+encodeURIComponent(e.id)+'" target="_blank">'+
@@ -699,8 +717,7 @@ if(VIEW!=='live'){
   function refreshData(){
     fetch('/api/events',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
       .then(function(d){if(!d)return;
-        if(d.today){document.getElementById('sIn').textContent=d.today['in']||0;
-          document.getElementById('sOut').textContent=d.today.out||0;}
+        if(d.today)setTodayCounts(d.today['in'],d.today.out);
         var ds=JSON.stringify(d.days||{});
         if(ds!==lastDays){lastDays=ds;DAYS=d.days;renderStrip();
           if(selDay){delete dayCache[selDay];renderCalDay();}}})
@@ -907,6 +924,19 @@ Bun.serve({
       return Response.json({ ok: true, bytes: buf.byteLength, at: live2At, seq: live2Seq });
     }
 
+    // Edge runtime stats push — Bearer token (Pi → VPS). Rendered in the header,
+    // never burned into the live frame.
+    if (url.pathname === "/api/stats" && req.method === "POST") {
+      if (!bearerOk(req)) return new Response("unauthorized", { status: 401 });
+      try {
+        edgeStats = (await req.json()) as Record<string, unknown>;
+        edgeStatsAt = Date.now();
+      } catch (e) {
+        console.warn("[tracker-web] /api/stats bad body", e);
+      }
+      return Response.json({ ok: true, at: edgeStatsAt });
+    }
+
     // Camera config — Pi pulls with Bearer, dashboard reads/writes with Basic
     if (url.pathname === "/api/config" && req.method === "GET") {
       if (!bearerOk(req) && !basicOk(req)) return unauthorized();
@@ -930,6 +960,8 @@ Bun.serve({
         live2_wanted, cam2: CAM2,
         counts: { in: allIn, out: allOut },
         today: { date: istNow(), in: tIn, out: tOut },
+        edge: edgeStats,
+        edge_age: edgeStatsAt ? Math.round((Date.now() - edgeStatsAt) / 1000) : null,
       });
     }
     if (url.pathname === "/api/config" && req.method === "POST") {
