@@ -392,7 +392,7 @@ main{max-width:920px;margin:0 auto;padding:14px}
 .feed{position:relative}
 .player{position:relative;width:100%;aspect-ratio:16/9;background:#0b1220;border-radius:16px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow)}
 .player img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:translateZ(0)}
-.feedtag{position:absolute;left:10px;top:10px;z-index:2;font-size:11px;font-weight:700;color:#fff;background:rgba(15,23,42,.6);backdrop-filter:blur(4px);padding:5px 10px;border-radius:999px;display:flex;align-items:center;gap:6px;pointer-events:none}
+.feedtag{position:absolute;right:10px;top:10px;z-index:2;font-size:11px;font-weight:700;color:#fff;background:rgba(15,23,42,.6);backdrop-filter:blur(4px);padding:5px 10px;border-radius:999px;display:flex;align-items:center;gap:6px;pointer-events:none}
 .feedtag .d{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(22,163,74,.25)}
 .sub{margin:12px 2px 0;color:var(--muted);font-size:12px;text-align:center}
 .daystrip{display:flex;gap:8px;overflow-x:auto;padding:2px 2px 10px;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}
