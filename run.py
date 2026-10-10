@@ -1886,6 +1886,11 @@ def main():
     stat_t = time.time()
     stat_frames = 0
     stat_dets = 0
+    # Session counters for the crossing gate's suppressors, so on-device stats
+    # (the journal isn't readable) show whether the re-arm/dedup is blocking
+    # would-be crossings — i.e. whether the scene-specific re-arm is too wide.
+    n_rearm_block = 0
+    n_dedup_block = 0
     objects = []          # carried across stalled (repeated) frames for the live feed
     prev_frame_t = 0.0
 
@@ -1972,13 +1977,15 @@ def main():
                 detect_fps = (dc - stat_dets) / el
                 temp_c = _cpu_temp()
                 print(f"[stat] track={track_fps:.1f} fps  detect={detect_fps:.1f} fps  "
-                      f"tracks={len(objects)}  temp={temp_c:.1f}C")
+                      f"tracks={len(objects)}  temp={temp_c:.1f}C  "
+                      f"rearm_block={n_rearm_block} dedup_block={n_dedup_block}")
                 payload = {
                     "track_fps": round(float(track_fps), 1),
                     "detect_fps": round(float(detect_fps), 1),
                     "tracks": int(len(objects)),
                     "temp_c": None if temp_c != temp_c else round(float(temp_c), 1),
                     "in": int(c_in), "out": int(c_out),
+                    "rearm_block": int(n_rearm_block), "dedup_block": int(n_dedup_block),
                 }
                 _write_stats(payload)
                 if cfg.stats_url:
@@ -2006,6 +2013,7 @@ def main():
                 # Commit the candidate flip only if the re-arm/hysteresis gate
                 # accepts it (a rejected candidate leaves the side unchanged).
                 if not cross_gate.allow(obj, h):
+                    n_rearm_block += 1
                     continue
                 direction = 'IN' if crossing == CROSSING_IN else 'OUT'
                 # Safety net: if another track crossed the same way here moments
@@ -2018,6 +2026,7 @@ def main():
                         if debug:
                             print(f"[dbg] #{obj.track_id} duplicate crossing "
                                   f"{direction} suppressed")
+                        n_dedup_block += 1
                         continue
                     recent_cross.append((now_t, crossing, tuple(obj.bbox)))
                 # Hand the capture to a worker: it persists the crossing from the
