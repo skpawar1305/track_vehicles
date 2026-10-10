@@ -80,6 +80,14 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   temporary gets GC'd -> use-after-free -> one bad frame poisons the net into
   returning ~100 garbage boxes forever). Copy frames handed between threads.
 - Ultralytics' ncnn export breaks non-square models; use `pnnx` directly.
+- **INT8 is post-training only — calibrate, never fine-tune.** `tools/quantize_int8.py`
+  (`ncnn2table` + `ncnn2int8`) rewrites just `model_int8.ncnn.bin` + `model_int8.table`
+  from the fp32 graph; the calibration images only set per-tensor activation ranges,
+  they do not train anything. The production model is calibrated on `calib/dumper_trucks/`
+  (public dump-truck/tipper photos — dumper is the class the counter cares about; site
+  captures are deliberately **not** used). Calibration images must already be at the
+  model input size (320x320, letterboxed like inference); do not re-export the fp32 graph
+  when only re-calibrating.
 - The NVR has no MJPEG/JPEG endpoint; browsers cannot play raw RTSP — do not assume.
 - **RTSP Digest is MD5-only in FFmpeg — SHA-256 cameras need the relay.** Every
   FFmpeg-backed reader (OpenCV `CAP_FFMPEG`, PyAV, `imageio-ffmpeg`, GStreamer `rtspsrc`)

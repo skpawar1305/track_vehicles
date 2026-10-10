@@ -11,6 +11,8 @@ captures/
 test_captures/
 *.jpg
 *.png
+# ...except the tracked INT8 calibration set (public COCO crops, not site data)
+!calib/dumper_trucks/*.jpg
 
 # offline store
 events.db
@@ -35,6 +37,7 @@ models/yolo26n_ncnn_256x416/
 models/yolo26n_ncnn_288x288/
 models/yolo26n_ncnn_320x512/
 models/yolo26n_ncnn_384x640/
+models/yolo26n_ncnn_640x640/
 
 # web
 web/node_modules/

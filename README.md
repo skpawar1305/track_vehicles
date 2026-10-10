@@ -82,7 +82,8 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/set_camera_time.py` | Read/set a camera clock over ONVIF (Manual or NTP) |
 | `web/` | Bun dashboard + ingest API (Drizzle + SQLite) |
 | `deploy/` | systemd units + env examples for the Pi |
-| `models/yolo26n_ncnn_320x320/` | Production model (fp32 + INT8), ROI-matched input |
+| `models/yolo26n_ncnn_320x320/` | Production model (fp32 + INT8), ROI-matched input; INT8 calibrated on dumpers |
+| `calib/dumper_trucks/` | INT8 calibration images (dump trucks / tippers / haulers) for the production model |
 
 ## Pi quick start (DietPi 64-bit)
 
@@ -277,6 +278,20 @@ python tools/quantize_int8.py --model models/yolo26n_ncnn_320x320 \
 # 3. run
 TRACKER_MODEL=yolo26n TRACKER_MODEL_IMGSZ=320x320 TRACKER_INT8=1 ./venv/bin/python run.py
 ```
+
+INT8 is **post-training only — no fine-tuning.** The calibration images never
+train the model; they only pick the per-tensor activation ranges (`ncnn2table`)
+that `ncnn2int8` bakes into `model_int8.*`. The production model is calibrated on
+`calib/dumper_trucks/` (public dump-truck/tipper photos — the truck class the
+counter cares about; see its `README.md` / `ATTRIBUTIONS.md`), which only rewrites
+`model_int8.ncnn.bin` + `model_int8.table` while the fp32 graph stays identical:
+
+```bash
+python tools/quantize_int8.py --model models/yolo26n_ncnn_320x320 \
+    --calib calib/dumper_trucks/list.txt --shape 320 320 \
+    --tools <ncnn bin dir with ncnn2table/ncnn2int8>
+```
+
 
 Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` ≈ 36;
 `256x256` ≈ 46 (smaller = faster, lower confidence). `run.py` logs
