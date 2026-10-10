@@ -104,6 +104,17 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   5h30m behind — local time mistaken for UTC). `tools/set_camera_time.py` reads/sets it over
   ONVIF (`SetSystemDateAndTime` + `SetNTP`, WS-UsernameToken; password via
   `TRACKER_CAM_PASSWORD`). Keep it on NTP so it self-corrects.
+- **A blurry/blocky stream is the substream encoder or UDP loss — not TCP, and check it with
+  `tools/onvif_media.py`.** The relay already negotiates `RTP/AVP/UDP;unicast`
+  (`rtsp_relay.py`), so there is no TCP→UDP switch; TCP would show as *freezes*, UDP loss as
+  *blur*. `tools/onvif_media.py` (ONVIF `GetVideoEncoderConfigurations`/`GetProfiles`/
+  `GetStreamUri`, WS-UsernameToken, creds from `config.json` `stream_url` or
+  `TRACKER_CAM_PASSWORD`) prints each profile's resolution, `BitrateLimit`, `FrameRateLimit`
+  and `GovLength`. Measured on the PT-NC120D3: substream 640x360, ≤25 fps, **1024 kbps,
+  GOP=50** — bitrate is fine, so blur is packet loss, and GOP=50 (2 s) makes artifacts linger
+  up to 2 s. Fixes: shorten the GOP (ONVIF `SetVideoEncoderConfiguration`, faster resync),
+  raise the UDP receive buffer, or get the camera/Pi off Wi-Fi. **When onboarding a new
+  camera, run `tools/onvif_media.py` first** to record its substream bitrate/GOP.
 - **Evidence captures come from the substream, not the main stream.** Counting and
   evidence both use the crossing substream frame now: one `<id>.jpg` (the crossing
   frame) plus a thumbnail built from the same frame, no `_sub` copy (`sub_path`

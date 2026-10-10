@@ -84,6 +84,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/test_clip.py` | Run the production tracker/crossing over a video clip and report IN/OUT |
 | `tools/test_crossing.py` | Synthetic crossing-gate regression + annotated re-arm demo video |
 | `tools/set_camera_time.py` | Read/set a camera clock over ONVIF (Manual or NTP) |
+| `tools/onvif_media.py` | Inspect a camera's ONVIF encoder configs / profiles / RTSP URIs (diagnose a blurry substream) |
 | `web/` | Bun dashboard + ingest API (Drizzle + SQLite) |
 | `deploy/` | systemd units + env examples for the Pi |
 | `models/yolo26n_ncnn_320x320/` | Production model (fp32 + INT8), ROI-matched input; INT8 calibrated on dumpers |
