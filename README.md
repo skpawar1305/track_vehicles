@@ -28,14 +28,14 @@ Data leaves the Pi over **HTTPS only** (no SSH). Captures are stored locally and
 only after the VPS acknowledges them, so outages lose nothing. Live frames are relayed the
 same way (outbound POST), and the dashboard is behind HTTP Basic auth.
 
-## Android port (early prototype)
+## Android/phone replacement (evaluated, not pursued)
 
-An ARM64 Rust/Android prototype for a screen-off, foreground-service deployment on the Galaxy
-S21 FE is in [`rust_port/`](rust_port/README.md). It includes the Rust tracker/gate primitives,
-an Android wake-lock service, persistent SQLite sync scaffolding and boot recovery. **RTSP,
-H.264 decoding, vehicle inference, and the detector-to-count path are not ported yet**, so this
-prototype does not count vehicles. Follow its device setup and staged soak-test notes before
-using any Android build for continuous operation.
+A phone edge was prototyped to use the camera's 1080p main stream, which the Pi cannot afford
+to decode. It was **rejected**: on the S21 FE the software YUV→RGB path capped 1080p decode at
+~12 fps and the SoC throttled (inference ~45–51 ms), i.e. no faster than the Pi's inference, so
+the phone offered no counting advantage while being a far weaker always-on host (OS service
+kills, battery and thermal limits). The edge stays on the Pi with the substream. The camera and
+stream constraints behind this decision are recorded in `AGENTS.md`.
 
 The terminal is the same idea in reverse: `term_agent.py` keeps an **outbound** WebSocket to
 the VPS (`/api/term?role=agent`) and bridges it to a local PTY, so a browser can get a shell

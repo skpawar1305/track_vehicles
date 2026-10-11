@@ -120,6 +120,25 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   **The camera downscales the same field of view rather than cropping**, so the normalized
   line/ROI stay valid across a resolution change — no re-draw needed. **When onboarding a new
   camera, run `tools/onvif_media.py` first** to record its substream bitrate/GOP.
+- **The main stream can't rescue the Pi, and this camera offers no workaround.** Measured
+  PT-NC120D3 capabilities (ONVIF): only two **H.264** encoders — main `VideoEncoderToken_1` /
+  `Profile_1` / `Channels/101` (only `1280x720` or `1920x1080`) and sub `VideoEncoderToken_2` /
+  `Profile_2` / `Channels/102` (`640x360`/`640x480`). **No MJPEG/JPEG** (common HTTP MJPEG paths
+  return 404; ONVIF has no JPEG encoder — only `/onvif-http/snapshot` exists), **no PTZ**
+  (`GetCapabilities` has no PTZ service), and the ONVIF **source `Bounds` is fixed**
+  (`BoundsRange` `Width 1920..1920`, `XRange 0..0`), so it cannot crop/scale — every profile
+  encodes the full field of view. The **Pi 5 has no hardware H.264 decoder** (no `/dev/video*`,
+  no V4L2/ffmpeg/GStreamer), so the main stream is software-decoded: measured **720p main ≈
+  14–15 fps at 73–76 °C** (sits on the 75 °C `step_wise` trip, decode-limited) vs the
+  substream's **~19 fps at ~66 °C**, and changing the camera fps (`20` vs `25`) does **not** help
+  — the Pi decodes every frame it receives, so it is decode-limited not source-limited.
+  **Decode is whole-frame**: H.264 inter-frame prediction references pixels outside the ROI and
+  entropy coding is sequential, so the ROI can only be cropped *after* decode; a crop saves
+  inference input, never decode cost. Net: keep the Pi on the substream — there is no crop /
+  zoom / MJPEG trick. (A phone edge with a hardware decoder was tried and rejected too: its
+  1080p software YUV→RGB path capped at ~12 fps and throttled, with inference no faster than
+  the Pi's.) The Prama/Hikvision-OEM NVR is no help either: it relays/records the camera's
+  H.264/H.265 only.
 - **Evidence captures come from the substream, not the main stream.** Counting and
   evidence both use the crossing substream frame now: one `<id>.jpg` (the crossing
   frame) plus a thumbnail built from the same frame, no `_sub` copy (`sub_path`
