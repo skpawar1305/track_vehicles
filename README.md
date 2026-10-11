@@ -223,12 +223,12 @@ Pages (each its own URL; `/` redirects to `/live`):
 - **Timeline data:** the page loads only per-day IN/OUT counts (`GET /api/events`, polled
   every 8 s); a day's captures are fetched on demand from `GET /api/day?d=YYYY-MM-DD` and
   cached client-side (stale-while-revalidate), so switching days is instant and never flashes
-  "Loading". The header counts refresh from `GET /api/config`. Each capture card's image opens
-  the saved full image; a small **thumb** link opens the substream thumbnail and a **line** link
-  (when the main-stream fetch succeeded) opens the exact substream crossing frame (`/sub`). Each
-  capture has an **Ignore** toggle (`POST /api/ignore`): the card stays in the gallery (dimmed)
-  but drops out of every IN/OUT total, and the toggle is optimistic (in place, no gallery rebuild,
-  no scroll jump).
+  "Loading". The header counts refresh from `GET /api/config`. Each capture card shows the
+  substream thumbnail at the line; tapping it opens the saved full image, and a small icon
+  overlaid on the image opens the crossing thumbnail (`/thumb`) in a new tab. Each capture has a
+  compact **Ignore** icon (`POST /api/ignore`): the card stays in the gallery (dimmed) but drops
+  out of every IN/OUT total, and the toggle is optimistic (in place, no gallery rebuild, no
+  scroll jump).
 
 ### Web terminal (`/terminal`)
 
