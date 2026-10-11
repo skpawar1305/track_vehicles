@@ -165,6 +165,7 @@
                 <!-- svelte-ignore a11y_figcaption_index -->
                 <figcaption>
                   <span class="lab">{e.label || "vehicle"}</span>
+                  <a class="figsub" href={"/thumb/" + encodeURIComponent(e.id)} target="_blank" title="Thumbnail (substream)">thumb</a>
                   {#if e.sub}<a class="figsub" href={"/sub/" + encodeURIComponent(e.id)} target="_blank" title="Detection frame (substream)">line</a>{/if}
                   <span class="t"><b>{fmtTimeParts(e.ts).h}</b><span class="mm">{fmtTimeParts(e.ts).m}</span></span>
                 </figcaption>

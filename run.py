@@ -141,11 +141,13 @@ DUP_IOU = float(os.environ.get("TRACKER_DUP_IOU", "0.6"))
 # A duplicate crossing from a different track within this window (and overlapping
 # the previous box) is suppressed. 0 disables the safety net.
 CROSS_DEDUP_S = float(os.environ.get("TRACKER_CROSS_DEDUP_S", "1.0"))
-# Evidence captures default to the substream crossing frame. Requesting the
-# camera's main-profile ONVIF snapshot perturbs the counting substream on this
-# hardware (partial/blurry stills, occasional substream glitch), so the
-# main-stream fetch is opt-in via TRACKER_CAPTURE_MAIN_STREAM=1.
-CAPTURE_MAIN_STREAM = os.environ.get("TRACKER_CAPTURE_MAIN_STREAM", "0") == "1"
+# Evidence: the saved image is the camera's main-profile ONVIF snapshot (the
+# camera encodes the JPEG, so no Pi decode) and the thumbnail is always built
+# from the substream crossing frame, so the timeline shows the vehicle at the
+# line. Set TRACKER_CAPTURE_MAIN_STREAM=0 to save the substream frame as the
+# full image too (requesting the main-profile snapshot can perturb the counting
+# substream on some cameras).
+CAPTURE_MAIN_STREAM = os.environ.get("TRACKER_CAPTURE_MAIN_STREAM", "1") == "1"
 
 
 def _counting_classes(classes):
@@ -214,10 +216,11 @@ class Config:
         if not self.live2_url and _live:
             self.live2_url = _live.replace("/api/live", "/api/live2")
         self.live2_wanted = False
-        # Evidence defaults to the substream crossing frame. Opt in to a
-        # full-resolution main-profile ONVIF still (the camera encodes the JPEG,
-        # so no Pi decode) with TRACKER_CAPTURE_MAIN_STREAM=1; it falls back to
-        # the substream frame if the fetch fails. URL/user/password default to
+        # Evidence saves the full-resolution main-profile ONVIF still (the camera
+        # encodes the JPEG, so no Pi decode); the thumbnail comes from the
+        # substream crossing frame. Set TRACKER_CAPTURE_MAIN_STREAM=0 to save the
+        # substream frame as the full image too; the main-stream fetch falls back
+        # to the substream frame on failure anyway. URL/user/password default to
         # the stream URL's; override with TRACKER_CAPTURE_URL / _USER / _PASSWORD.
         self.capture_url = os.environ.get("TRACKER_CAPTURE_URL", "")
         self.capture_user = os.environ.get("TRACKER_CAPTURE_USER", "")
@@ -267,9 +270,8 @@ class Config:
         if not self.capture_password:
             self.capture_password = unquote(u.password or "")
         if not self.capture_url and CAPTURE_MAIN_STREAM:
-            # Opt-in only: the main-profile snapshot perturbs the counting
-            # substream on this hardware (blurry/glitched stills), so evidence
-            # defaults to the substream crossing frame instead.
+            # The saved evidence image is the main-profile snapshot; the
+            # thumbnail still comes from the substream crossing frame.
             self.capture_url = f"https://{u.hostname}/onvif-http/snapshot?Profile_1"
 
     def save(self):
@@ -494,14 +496,14 @@ class CaptureManager:
     def store_crossing(self, frame, jpeg, track_id, direction, crossed_at=None):
         """Persist one crossing.
 
-        When `jpeg` is None (the default, and the only path unless the opt-in
-        `TRACKER_CAPTURE_MAIN_STREAM=1` succeeds) the substream frame captured
-        at the crossing is the source for both the full image `<id>.jpg` and the
-        thumbnail — no separate `_sub` copy, since storing the same pixels twice
-        is waste. When an opt-in main-stream `jpeg` is supplied, `<id>.jpg` holds
-        that full-size still and `<id>_sub.jpg` keeps the substream frame; the
-        thumbnail is ALWAYS built from the substream frame, so the timeline shows
-        the vehicle at the line rather than the delayed main-stream moment.
+        When `jpeg` is None (the substream fallback, or `TRACKER_CAPTURE_MAIN_STREAM=0`)
+        the substream frame captured at the crossing is the source for both the
+        full image `<id>.jpg` and the thumbnail — no separate `_sub` copy, since
+        storing the same pixels twice is waste. When a main-stream `jpeg` is
+        supplied (the default path), `<id>.jpg` holds that full-size still and
+        `<id>_sub.jpg` keeps the substream frame; the thumbnail is ALWAYS built
+        from the substream frame, so the timeline shows the vehicle at the line
+        rather than the delayed main-stream moment.
         """
         ts = self._ts(crossed_at)
         direction_label = "in" if direction == 1 else "out"
@@ -1621,9 +1623,9 @@ def fetch_capture_jpeg(cfg, timeout=6.0):
     between crossings, so the still is fetched with (ideally) a single
     round-trip and lands as close as possible to the crossing instant.
 
-    Opt-in only (`TRACKER_CAPTURE_MAIN_STREAM=1`): by default this returns None
-    so evidence comes from the substream crossing frame and the camera's main
-    encoder is never touched.
+    Enabled by default; set `TRACKER_CAPTURE_MAIN_STREAM=0` to return None so
+    the substream crossing frame is saved as the full image and the camera's
+    main encoder is never touched.
     """
     import requests
     from requests.auth import HTTPDigestAuth
@@ -1702,14 +1704,14 @@ def persist_capture(cfg, capture_mgr, store, item, jpeg):
 def capture_loop(cfg, capture_mgr, store, capture_q):
     """Persist crossings on a worker thread (fetch/save off the track loop).
 
-    By default both the full image and the thumbnail come from the substream
-    frame captured at the crossing, so the camera's main encoder is never
-    exercised (its snapshot perturbs the counting substream on this hardware).
-    With `TRACKER_CAPTURE_MAIN_STREAM=1` it tries a full-resolution main-stream
-    still for the full image and falls back to the substream frame when the
-    snapshot is stale (the worker was busy with earlier crossings) or
-    unavailable — an accurately-timed low-res frame beats a crisp frame of the
-    wrong moment.
+    By default the full image is a full-resolution main-stream still and the
+    thumbnail is always built from the substream frame captured at the crossing,
+    so the timeline shows the vehicle at the line. It falls back to the substream
+    frame for the full image too when the snapshot is stale (the worker was busy
+    with earlier crossings) or unavailable — an accurately-timed low-res frame
+    beats a crisp frame of the wrong moment. With `TRACKER_CAPTURE_MAIN_STREAM=0`
+    the substream frame is saved as the full image and the camera's main encoder
+    is never exercised.
     """
     # Drain on shutdown too: `cfg.running` goes False before the main loop
     # exits, but anything already counted and queued must still be persisted so
@@ -2047,8 +2049,8 @@ def main():
                         n_dedup_block += 1
                         continue
                     recent_cross.append((now_t, crossing, tuple(obj.bbox)))
-                # Hand the capture to a worker: it persists the crossing from the
-                # substream frame (and any opt-in main-stream still) without
+                # Hand the capture to a worker: it persists the crossing (the
+                # main-stream still, or the substream frame on fallback) without
                 # stalling the track loop.
                 item = {
                     "track_id": obj.track_id, "class_id": obj.class_id,

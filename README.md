@@ -159,8 +159,8 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_CAPTURE_PIPELINE` | – | GStreamer pipeline, e.g. Pi hardware `v4l2h264dec` |
 | `TRACKER_RTSP_RELAY` | `0` | Route capture through `RtspRelay` for SHA-256 Digest cameras |
 | `TRACKER_CAM2_URL` | – | Optional second camera substream shown raw on `/live` (no detection) |
-| `TRACKER_CAPTURE_MAIN_STREAM` | `0` | Opt in to a main-profile ONVIF snapshot for evidence (perturbs the substream) |
-| `TRACKER_CAPTURE_URL` | derived | Full-res crossing still URL; used only when `TRACKER_CAPTURE_MAIN_STREAM=1` |
+| `TRACKER_CAPTURE_MAIN_STREAM` | `1` | Saved image = main-profile ONVIF snapshot; set `0` to save the substream frame instead |
+| `TRACKER_CAPTURE_URL` | derived | Full-res crossing still URL; used when `TRACKER_CAPTURE_MAIN_STREAM=1` |
 | `TRACKER_CAPTURE_MAX_AGE` | `1.5` | Queue age (s) after which the main-stream fetch is skipped |
 | `TRACKER_DUP_IOU` | `0.6` | Same-vehicle IoU: detector cross-class NMS + crossing de-dupe |
 | `TRACKER_CROSS_DEDUP_S` | `1` | Window (s) for collapsing a duplicate crossing from a second track |
@@ -223,9 +223,12 @@ Pages (each its own URL; `/` redirects to `/live`):
 - **Timeline data:** the page loads only per-day IN/OUT counts (`GET /api/events`, polled
   every 8 s); a day's captures are fetched on demand from `GET /api/day?d=YYYY-MM-DD` and
   cached client-side (stale-while-revalidate), so switching days is instant and never flashes
-  "Loading". The header counts refresh from `GET /api/config`. Each capture has an **Ignore**
-  toggle (`POST /api/ignore`): the card stays in the gallery (dimmed) but drops out of every
-  IN/OUT total, and the toggle is optimistic (in place, no gallery rebuild, no scroll jump).
+  "Loading". The header counts refresh from `GET /api/config`. Each capture card's image opens
+  the saved full image; a small **thumb** link opens the substream thumbnail and a **line** link
+  (when the main-stream fetch succeeded) opens the exact substream crossing frame (`/sub`). Each
+  capture has an **Ignore** toggle (`POST /api/ignore`): the card stays in the gallery (dimmed)
+  but drops out of every IN/OUT total, and the toggle is optimistic (in place, no gallery rebuild,
+  no scroll jump).
 
 ### Web terminal (`/terminal`)
 
@@ -355,20 +358,21 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
   valid across a resolution change — no re-draw needed. If blur persists after
   raising the bitrate and cutting the GOP, it is packet loss (UDP/Wi-Fi), not the
   encoder; a shorter GOP only clears artifacts faster, it does not reduce them.
-- **Evidence captures come from the substream.** Counting and evidence both use
-  the 640×360 crossing substream frame: one `<id>.jpg` plus a thumbnail built
-  from the same frame, no `_sub` copy (`sub_path` NULL). This is deliberate —
-  requesting the camera's main-profile ONVIF snapshot
-  (`/onvif-http/snapshot?Profile_1`, camera-side JPEG, SHA-256 Digest) perturbs
-  the counting substream on the PT-NC120D3 (partial/blurry stills, occasional
-  substream glitch). The main-stream fetch is **opt-in** via
-  `TRACKER_CAPTURE_MAIN_STREAM=1`; when enabled it runs on the capture worker
+- **Evidence saves the main-stream image, thumbnails come from the substream.**
+  The saved `<id>.jpg` is the camera's main-profile ONVIF snapshot
+  (`/onvif-http/snapshot?Profile_1`, camera-side JPEG, SHA-256 Digest), while the
+  **thumbnail shown in the timeline is always the 640×360 substream frame from the
+  crossing instant**, so it shows the vehicle at the line. Set
+  `TRACKER_CAPTURE_MAIN_STREAM=0` to save the crossing substream frame as the full
+  image too: requesting the main-profile snapshot
+  can perturb the counting substream on the PT-NC120D3 (partial/blurry stills,
+  occasional substream glitch), which is why that was once the default. The fetch
+  runs on the capture worker
   (never the track loop), reuses a `requests.Session`, skips a stale still
-  (`TRACKER_CAPTURE_MAX_AGE`, default 1.5 s), and stores **both** `<id>.jpg`
-  (main stream) and `<id>_sub.jpg` (crossing frame, served at `/sub/<id>`).
-  URL/creds default to the stream URL's (`TRACKER_CAPTURE_URL`/`_USER`/`_PASSWORD`).
-  The **thumbnail shown in the timeline is always the substream frame from the
-  crossing instant**, so it shows the vehicle at the line regardless.
+  (`TRACKER_CAPTURE_MAX_AGE`, default 1.5 s), falls back to the substream frame,
+  and stores **both** `<id>.jpg`
+  (main stream) and `<id>_sub.jpg` (crossing frame, served at `/sub/<id>`) when it
+  succeeds. URL/creds default to the stream URL's (`TRACKER_CAPTURE_URL`/`_USER`/`_PASSWORD`).
 - **One vehicle can arrive as two class-boxes — de-duplicated.** The INT8 detector
   sometimes fires two near-identical boxes for one vehicle with different winning
   classes (car/truck), which would otherwise become two tracks and two counts. A

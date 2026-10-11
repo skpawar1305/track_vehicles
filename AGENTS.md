@@ -139,19 +139,18 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   1080p software YUV→RGB path capped at ~12 fps and throttled, with inference no faster than
   the Pi's.) The Prama/Hikvision-OEM NVR is no help either: it relays/records the camera's
   H.264/H.265 only.
-- **Evidence captures come from the substream, not the main stream.** Counting and
-  evidence both use the crossing substream frame now: one `<id>.jpg` (the crossing
-  frame) plus a thumbnail built from the same frame, no `_sub` copy (`sub_path`
-  NULL; the dashboard/`sync.py` tolerate it). This replaced the old default of
-  fetching the camera's main-profile ONVIF snapshot (`/onvif-http/snapshot?Profile_1`):
-  asking the camera for a main-profile still perturbs the counting substream on the
-  PT-NC120D3 (partial/blurry JPEGs, occasional substream glitch). The main-stream
-  fetch is now **opt-in** via `TRACKER_CAPTURE_MAIN_STREAM=1`; when enabled it still
-  runs on the capture worker (never the track loop), reuses a `requests.Session`
-  (keeps TLS + the digest nonce alive), skips a stale still (`TRACKER_CAPTURE_MAX_AGE`,
-  default 1.5 s in the queue), and writes both `<id>.jpg` (main stream) and
-  `<id>_sub.jpg` (crossing substream frame). The thumbnail is **always** built from
-  the crossing substream frame, so the timeline shows the vehicle at the line.
+- **Evidence saves the main-stream image, thumbnails from the substream.** The saved
+  `<id>.jpg` is the camera's full-resolution main-profile ONVIF snapshot
+  (`/onvif-http/snapshot?Profile_1`); the thumbnail is **always** built from the
+  crossing substream frame, so the timeline shows the vehicle at the line. Set
+  `TRACKER_CAPTURE_MAIN_STREAM=0` to save the substream frame as the full image too:
+  on the PT-NC120D3 asking the camera for a main-profile still can perturb the
+  counting substream (partial/blurry JPEGs, occasional substream glitch), which is
+  why that was once the default. The fetch runs on the capture worker (never the
+  track loop), reuses a `requests.Session` (keeps TLS + the digest nonce alive),
+  skips a stale still (`TRACKER_CAPTURE_MAX_AGE`, default 1.5 s in the queue), falls
+  back to the substream frame, and writes `<id>.jpg` (main stream) plus `<id>_sub.jpg`
+  (crossing substream frame) when it succeeds.
 - **One vehicle often produces two class-boxes — dedupe at the detector.** The
   INT8 model frequently fires two near-identical boxes with different winning
   classes (car+truck, bus+truck; IoU 0.76–0.93) for one vehicle. Per-class NMS
