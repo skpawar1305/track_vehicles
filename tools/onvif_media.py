@@ -122,13 +122,16 @@ class OnvifMedia:
         if "Fault" in x and "GetVideoEncoderConfigurationsResponse" not in x:
             return [], _flat(x)[:200]
         out = []
-        for block in re.findall(r"<trt:Configurations[^>]*>(.*?)</trt:Configurations>", x, re.S):
-            tok = re.search(r'<trt:Configurations[^>]*token="([^"]+)"', x)
+        for m in re.finditer(
+                r'<trt:Configurations\b[^>]*token="([^"]+)"[^>]*>(.*?)</trt:Configurations>',
+                x, re.S):
+            tok, block = m.group(1), m.group(2)
             def g(tag, s=block):
-                m = re.search(rf"<tt:{tag}>([^<]+)</tt:{tag}>", s)
-                return m.group(1).strip() if m else None
+                mm = re.search(rf"<tt:{tag}>([^<]+)</tt:{tag}>", s)
+                return mm.group(1).strip() if mm else None
             res = re.search(r"<tt:Width>(\d+)</tt:Width>\s*<tt:Height>(\d+)</tt:Height>", block)
             out.append({
+                "token": tok,
                 "name": g("Name"),
                 "encoding": g("Encoding"),
                 "resolution": (f"{res.group(1)}x{res.group(2)}" if res else "?"),
@@ -196,7 +199,7 @@ def main():
         print("[onvif] GetVideoEncoderConfigurations:", err)
     print("[onvif] encoder configs:")
     for e in encs:
-        print(f"    {e['name']}: {e['encoding']} {e['resolution']} "
+        print(f"    [{e.get('token','?')}] {e['name']}: {e['encoding']} {e['resolution']} "
               f"fps<={e['fps_limit']} bitrate<={e['bitrate_limit']}kbps "
               f"GOP={e['gov_length']} quality={e['quality']} {e['h264_profile'] or ''}".rstrip())
     print("[onvif] profiles:")

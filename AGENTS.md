@@ -110,10 +110,15 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   *blur*. `tools/onvif_media.py` (ONVIF `GetVideoEncoderConfigurations`/`GetProfiles`/
   `GetStreamUri`, WS-UsernameToken, creds from `config.json` `stream_url` or
   `TRACKER_CAM_PASSWORD`) prints each profile's resolution, `BitrateLimit`, `FrameRateLimit`
-  and `GovLength`. Measured on the PT-NC120D3: substream 640x360, ≤25 fps, **1024 kbps,
-  GOP=50** — bitrate is fine, so blur is packet loss, and GOP=50 (2 s) makes artifacts linger
-  up to 2 s. Fixes: shorten the GOP (ONVIF `SetVideoEncoderConfiguration`, faster resync),
-  raise the UDP receive buffer, or get the camera/Pi off Wi-Fi. **When onboarding a new
+  and `GovLength`. Measured on the direct PT-NC120D3 (substream profile `Profile_2` /
+  `Channels/102`, encoder token `VideoEncoderToken_2`): it offers only **`640x360` and
+  `640x480`** (there is no `640x320`); production now runs **`640x360`, 2048 kbps, GOP=25**
+  (was `640x480`/1024/50) to cut decode and compression blur. Set these with
+  `tools/set_encoder.py` (`SetVideoEncoderConfiguration`, dry-run by default — it re-sends the
+  camera's own XML with only the target tags substituted). Fixes for lingering blur: shorten
+  the GOP (faster resync), raise the UDP receive buffer, or get the camera/Pi off Wi-Fi.
+  **The camera downscales the same field of view rather than cropping**, so the normalized
+  line/ROI stay valid across a resolution change — no re-draw needed. **When onboarding a new
   camera, run `tools/onvif_media.py` first** to record its substream bitrate/GOP.
 - **Evidence captures come from the substream, not the main stream.** Counting and
   evidence both use the crossing substream frame now: one `<id>.jpg` (the crossing

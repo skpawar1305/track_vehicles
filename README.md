@@ -94,6 +94,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/test_crossing.py` | Synthetic crossing-gate regression + annotated re-arm demo video |
 | `tools/set_camera_time.py` | Read/set a camera clock over ONVIF (Manual or NTP) |
 | `tools/onvif_media.py` | Inspect a camera's ONVIF encoder configs / profiles / RTSP URIs (diagnose a blurry substream) |
+| `tools/set_encoder.py` | Read/set a camera's ONVIF encoder (resolution/bitrate/GOP/fps/quality); dry-run by default |
 | `web/` | SvelteKit (static SPA) dashboard + Bun ingest/reverse-terminal API (Drizzle + SQLite) |
 | `deploy/` | systemd units + env examples for the Pi |
 | `models/yolo26n_ncnn_320x320/` | Production model (fp32 + INT8), ROI-matched input; INT8 calibrated on dumpers |
@@ -345,6 +346,15 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
   set it with `tools/set_camera_time.py`; prefer `--set-ntp pool.ntp.org` so it
   self-corrects. It uses ONVIF `Get/SetSystemDateAndTime` + `SetNTP` with
   WS-UsernameToken auth (pass the password via `TRACKER_CAM_PASSWORD`).
+- **Sharpen the substream at the camera, not the Pi.** `tools/set_encoder.py`
+  reads/sets the ONVIF encoder (resolution/bitrate/GOP/fps/quality) over
+  WS-UsernameToken, dry-run by default. The PT-NC120D3 substream only offers
+  `640x360` and `640x480` (there is no `640x320`); production runs
+  **`640x360`, 2048 kbps, GOP 25** (was `640x480`/1024/50). The camera downscales
+  the *same* field of view rather than cropping, so the normalized line/ROI stay
+  valid across a resolution change — no re-draw needed. If blur persists after
+  raising the bitrate and cutting the GOP, it is packet loss (UDP/Wi-Fi), not the
+  encoder; a shorter GOP only clears artifacts faster, it does not reduce them.
 - **Evidence captures come from the substream.** Counting and evidence both use
   the 640×360 crossing substream frame: one `<id>.jpg` plus a thumbnail built
   from the same frame, no `_sub` copy (`sub_path` NULL). This is deliberate —
