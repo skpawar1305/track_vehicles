@@ -344,7 +344,7 @@ class Config:
 cfg = Config()
 
 # ── Line crossing ─────────────────────────────────────────────────────
-CROSSING_NONE, CROSSING_IN, CROSSING_OUT = 0, 1, 2
+CROSSING_NONE, CROSSING_IN, CROSSING_OUT, CROSSING_BLOCKED = 0, 1, 2, 3
 
 def line_geometry(line, point):
     """Signed perpendicular distance (px) of `point` to `line`, and its
@@ -397,20 +397,17 @@ def detect_crossing(line, old_centroid, new_centroid, flip=False):
 class CrossingGate:
     """Committed-side line crossing with hysteresis and a single re-arm guard.
 
-    The whole rule set is two gates:
+    ``update()`` is the whole rule set. A track commits to the side of the line
+    it is first seen on; a flip counts only when the centroid lands
+    ``margin_frac`` of the frame height past the line, *inside* the drawn
+    segment, is at least ``min_age`` frames old, and has moved ``rearm_frac`` of
+    the frame height away from the point of its previous crossing. So a machine
+    that wobbles on the line (or creeps a little past it) never re-counts, while
+    a genuine pass-through that later returns still counts again.
 
-    * **hysteresis** — a track commits to a side the first time it is seen; a
-      flip is only a *candidate* when the centroid lands ``margin_frac`` of the
-      frame height past the line, with the crossing point inside the drawn
-      segment. ``crossing()`` records the candidate and ``allow()`` commits it,
-      so a rejected candidate leaves the track on its old side (the old
-      eager-flip bug turned a parked machine on the line into alternating
-      IN/OUT events).
-    * **re-arm** — after a committed crossing the track must move ``rearm_frac``
-      of the frame height away from where it crossed before another flip may
-      commit. A vehicle that only drifts back and forth at the line never
-      re-arms and is counted once; a real pass-through moves far enough that a
-      later genuine return still counts.
+    Returns CROSSING_NONE, CROSSING_IN, CROSSING_OUT, or CROSSING_BLOCKED — the
+    last is a real cross the age/re-arm guard refused, kept only so the caller
+    can report the ``rearm_block`` stat.
     """
 
     def __init__(self, min_age=4, margin_frac=0.06, rearm_frac=0.2,
@@ -421,61 +418,39 @@ class CrossingGate:
         self.seg_tol = seg_tol
         self.last_pt = {}     # tid -> centroid where the last crossing committed
         self.side = {}        # tid -> last committed side (+1/-1) outside the band
-        self._pending = {}    # tid -> candidate side, committed only by `allow`
 
     def drop(self, dead_ids):
         for tid in dead_ids:
             self.last_pt.pop(tid, None)
             self.side.pop(tid, None)
-            self._pending.pop(tid, None)
 
-    def crossing(self, line, obj, flip=False, frame_h=360):
-        """Stateful line-crossing test with hysteresis. Returns NONE/IN/OUT.
-
-        A crossing is registered only when the object's centroid moves from one
-        committed side of the line to the other, landing at least
-        ``margin_frac * frame_h`` px past it, with the crossing point inside the
-        drawn segment. Committing to a side means a low-confidence box whose
-        centroid jitters across the line by a pixel or two never registers a
-        crossing.
-        """
+    def update(self, line, obj, flip=False, frame_h=360):
         dist, t = line_geometry(line, obj.centroid)
         margin = self.margin_frac * frame_h
         if dist is None or abs(dist) < margin:
-            # Not a crossing. Inside the band is also "came back to the line",
-            # so any pending candidate is abandoned.
-            self._pending.pop(obj.track_id, None)
+            # Inside the hysteresis band: not a crossing.
             return CROSSING_NONE
         new_side = 1 if dist >= 0 else -1
         prev = self.side.get(obj.track_id)
         if prev is None or prev == new_side:
+            # First sight, or still on the same committed side.
             self.side[obj.track_id] = new_side
-            self._pending.pop(obj.track_id, None)
             return CROSSING_NONE
         if t < -self.seg_tol or t > 1 + self.seg_tol:
-            # Crossed the infinite line, but outside the drawn segment: re-arm
-            # without counting.
+            # Crossed the infinite line, but outside the drawn segment: take the
+            # new side without counting.
             self.side[obj.track_id] = new_side
-            self._pending.pop(obj.track_id, None)
             return CROSSING_NONE
-        self._pending[obj.track_id] = new_side
+        # A genuine cross. Commit only if the track is old enough and has
+        # re-armed away from its previous crossing; otherwise leave the side
+        # unchanged so the cross can still commit on a later frame.
+        if obj.age < self.min_age or self.rearm_remaining(obj, frame_h):
+            return CROSSING_BLOCKED
+        self.side[obj.track_id] = new_side
+        self.last_pt[obj.track_id] = (float(obj.centroid[0]), float(obj.centroid[1]))
         if flip:
             return CROSSING_OUT if new_side == 1 else CROSSING_IN
         return CROSSING_IN if new_side == 1 else CROSSING_OUT
-
-    def allow(self, obj, frame_h):
-        if obj.age < self.min_age:
-            return False
-        # Re-arm: after a crossing the track must get `rearm_frac` of the frame
-        # height away from where it crossed before another crossing may commit.
-        if self.rearm_remaining(obj, frame_h):
-            return False
-        # Accepted: commit the candidate side flip and re-anchor the gate here.
-        new_side = self._pending.pop(obj.track_id, None)
-        if new_side is not None:
-            self.side[obj.track_id] = new_side
-        self.last_pt[obj.track_id] = (float(obj.centroid[0]), float(obj.centroid[1]))
-        return True
 
     def rearm_remaining(self, obj, frame_h):
         """Px the track still has to move from its last crossing before it can
@@ -1477,6 +1452,12 @@ def draw_gate_overlay(img, line, objects, gate, frame_h, margin_px, scale=1.0):
             cv2.line(img, a, b, (170, 170, 170), 1, cv2.LINE_AA)
     if gate is None:
         return img
+    ux, uy = 1.0, 0.0   # unit vector along the line (for orienting the re-arm shape)
+    if line:
+        ldx, ldy = line[2] - line[0], line[3] - line[1]
+        llen = (ldx * ldx + ldy * ldy) ** 0.5
+        if llen > 1:
+            ux, uy = ldx / llen, ldy / llen
     for obj in objects:
         remaining = gate.rearm_remaining(obj, frame_h)
         armed = not remaining            # None (never crossed) or 0.0 => armed
@@ -1485,7 +1466,19 @@ def draw_gate_overlay(img, line, objects, gate, frame_h, margin_px, scale=1.0):
         if lp is not None:
             ax, ay = int(lp[0] * scale), int(lp[1] * scale)
             r = max(2, int(gate.rearm_frac * frame_h * scale))
-            cv2.circle(img, (ax, ay), r, col, 1, cv2.LINE_AA)
+            # Re-arm region drawn as a parallelogram aligned with the line
+            # (was a circle): half-length r along the line, half-width 0.4r
+            # across, skewed 0.3r along the line.
+            sax, say = r * ux, r * uy
+            nbx = 0.4 * r * (-uy) + 0.3 * r * ux
+            nby = 0.4 * r * ux + 0.3 * r * uy
+            quad = np.array([
+                (int(ax + sax + nbx), int(ay + say + nby)),
+                (int(ax - sax + nbx), int(ay - say + nby)),
+                (int(ax - sax - nbx), int(ay - say - nby)),
+                (int(ax + sax - nbx), int(ay + say - nby)),
+            ], dtype=np.int32)
+            cv2.polylines(img, [quad.reshape((-1, 1, 2))], True, col, 1, cv2.LINE_AA)
             cv2.circle(img, (ax, ay), 3, col, -1, cv2.LINE_AA)
         cx, cy = int(obj.centroid[0] * scale), int(obj.centroid[1] * scale)
         cv2.circle(img, (cx, cy), 3, col, -1, cv2.LINE_AA)
@@ -2029,16 +2022,15 @@ def main():
                         print(f"[dbg] #{obj.track_id} {obj.label} age={obj.age} "
                               f"c={obj.centroid} (wait)")
                     continue
-                crossing = cross_gate.crossing(line_px, obj, flip=cfg.flip_sides,
-                                               frame_h=h)
+                crossing = cross_gate.update(line_px, obj, flip=cfg.flip_sides,
+                                             frame_h=h)
                 if debug:
                     print(f"[dbg] #{obj.track_id} {obj.label} age={obj.age} c={obj.centroid} "
                           f"side={cross_gate.side.get(obj.track_id)} cross={crossing}")
                 if crossing == CROSSING_NONE:
                     continue
-                # Commit the candidate flip only if the re-arm/hysteresis gate
-                # accepts it (a rejected candidate leaves the side unchanged).
-                if not cross_gate.allow(obj, h):
+                if crossing == CROSSING_BLOCKED:
+                    # Real cross, refused by the age/re-arm guard (side unchanged).
                     n_rearm_block += 1
                     continue
                 direction = 'IN' if crossing == CROSSING_IN else 'OUT'

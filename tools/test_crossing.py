@@ -22,7 +22,7 @@ import numpy as np
 
 os.environ.setdefault("TRACKER_RELAY_REEXEC", "1")   # keep the import hermetic
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from run import CrossingGate, CROSSING_NONE, CROSSING_IN, draw_gate_overlay
+from run import CrossingGate, CROSSING_IN, CROSSING_OUT, draw_gate_overlay
 
 FPS = 25
 CLOCK0 = 1000.0         # simulated wall clock (absolute, like time.time())
@@ -85,8 +85,8 @@ def simulate(rearm_frac, ys):
         frame = i + 1
         obj = Obj(1, CX, y)
         obj.age = frame
-        cr = gate.crossing(LINE, obj, frame_h=H)
-        if cr != CROSSING_NONE and gate.allow(obj, H):
+        cr = gate.update(LINE, obj, frame_h=H)
+        if cr in (CROSSING_IN, CROSSING_OUT):
             events.append((round(frame / FPS, 2), "IN" if cr == CROSSING_IN else "OUT", frame))
     return events
 
@@ -101,12 +101,11 @@ def render(path, rearm_frac, ys):
         frame = i + 1
         obj = Obj(1, CX, y)
         obj.age = frame
-        cr = gate.crossing(LINE, obj, frame_h=H)
-        if cr != CROSSING_NONE and gate.allow(obj, H):
-            if cr == CROSSING_IN:
-                c_in += 1
-            else:
-                c_out += 1
+        cr = gate.update(LINE, obj, frame_h=H)
+        if cr == CROSSING_IN:
+            c_in += 1
+        elif cr == CROSSING_OUT:
+            c_out += 1
 
         img = np.full((H, W, 3), 22, np.uint8)
         cv2.line(img, LINE[:2], LINE[2:], (59, 130, 246), 2)

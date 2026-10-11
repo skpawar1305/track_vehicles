@@ -270,13 +270,11 @@ def main():
             for obj in objects:
                 if not (line_px and obj.age >= 2):
                     continue
-                crossing = gate.crossing(line_px, obj, flip=flip, frame_h=fh)
+                crossing = gate.update(line_px, obj, flip=flip, frame_h=fh)
                 if debug:
                     print(f"[dbg] #{obj.track_id} {obj.label} cross={crossing} "
                           f"age={obj.age} side={gate.side.get(obj.track_id)}")
-                if crossing == CROSSING_NONE:
-                    continue
-                if not gate.allow(obj, fh):
+                if crossing not in (CROSSING_IN, CROSSING_OUT):
                     continue
                 direction = "in" if crossing == CROSSING_IN else "out"
                 # Raw frame (no overlay) as training data

@@ -26,7 +26,7 @@ import cv2
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from run import YoloNcnn, CentroidTracker, CrossingGate, CROSSING_NONE, CROSSING_IN, draw_gate_overlay
+from run import YoloNcnn, CentroidTracker, CrossingGate, CROSSING_NONE, CROSSING_IN, CROSSING_OUT, draw_gate_overlay
 
 
 def parse_line(s, w, h):
@@ -125,10 +125,8 @@ def main():
         for obj in objects:
             if obj.age < args.min_age:
                 continue
-            crossing = gate.crossing(line, obj, frame_h=h)
-            if crossing == CROSSING_NONE:
-                continue
-            if not gate.allow(obj, h):
+            crossing = gate.update(line, obj, frame_h=h)
+            if crossing not in (CROSSING_IN, CROSSING_OUT):
                 continue
             d = "IN" if crossing == CROSSING_IN else "OUT"
             events.append((round(now, 1), obj.track_id, obj.label, d, obj.centroid))
