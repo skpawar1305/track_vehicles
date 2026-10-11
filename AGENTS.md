@@ -150,14 +150,28 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   streams nothing. The main feed's `live_wanted` gate is the same idea. On `/live`, left/right
   arrows switch between Main and Camera 2 and **only the visible feed is polled** — the idle
   feed's `*_wanted` flag goes stale within ~10 s, so the Pi stops uploading it (half the live
-  data). Always opens on Main; the header LIVE dot tracks the active feed.
-- **The `/timeline` view is counts-first; captures load per day on demand.** `GET /api/events`
-  ships only per-day IN/OUT counts (polled every 8 s) and `GET /api/day?d=YYYY-MM-DD`
-  returns one day's events (cached client-side). Don't re-embed the whole event list in the
-  initial HTML — that was the old `/history` page (removed) and it made first paint and
-  month-hopping slow. The UI is a horizontal day-square strip (oldest→newest, today
-  auto-scrolled in), `←`/`→` steps a day and never goes into the future; days with zero
-  captures are still shown. `/calendar` 302-redirects to `/timeline`.
+  data). Always opens on Main; the header LIVE dot tracks the active feed. Because `/live`
+  polls a JPEG the server holds in memory, the first frame is **instant while warm** (any
+  `/live.jpg` fetch in the last ~10 s) but ~3.5 s **cold** — the Pi only learns `live_wanted`
+  on its 3 s config poll, then encodes+POSTs; it stops ~10 s after the last viewer.
+- **The dashboard is a static SvelteKit SPA served by `server.ts`, not server-rendered HTML.**
+  `web/` is a SvelteKit app (`@sveltejs/adapter-static`, `ssr=false`, `/` falls back to
+  `index.html`) built to `web/build/`; the Bun API server `web/server.ts` serves those assets
+  (`WEB_ROOT`, default `<server.ts dir>/spa`) and keeps `/api/*`, `/img|thumb|sub`,
+  `/live*.jpg`, and the reverse-terminal WS unchanged. Build with `bun run build`, copy
+  `build/` to `WEB_ROOT` (+ `server.ts`), restart `tracker-web.service`. Do **not** add
+  `+server.ts` / `+*server.ts` files to the SvelteKit app — adapter-static forbids server
+  routes; the API lives only in `server.ts`.
+- **The `/timeline` view is counts-first; captures load per day on demand.** The SPA fetches
+  `GET /api/events` (per-day IN/OUT counts, polled every 8 s) and `GET /api/day?d=YYYY-MM-DD`
+  for the open day (cached client-side, stale-while-revalidate, so day-hopping never flashes
+  "Loading"). Don't re-embed the whole event list in the initial page — that was the old
+  `/history` page (removed). The UI is a horizontal day-square strip (oldest→newest, today
+  auto-scrolled in), `←`/`→` steps a day and never into the future; days with zero captures
+  are still shown. Each capture has an **Ignore** toggle (`POST /api/ignore`) that keeps the
+  card in the gallery (dimmed) but drops it from every IN/OUT total (day badge, tabs, header,
+  `/api/config`); the toggle is optimistic (in-place, no gallery rebuild, no scroll jump).
+  `/calendar` 302-redirects to `/timeline`.
 - **The substream is a genuine ~25 fps — verify it, don't assume.** Measured on the
   current camera: `CAP_PROP_FPS` 25, PTS delta 40 ms/frame, ~25–29 frames/s delivered,
   and **0% bit-identical consecutive frames** over 10 s. So the tracker advances on

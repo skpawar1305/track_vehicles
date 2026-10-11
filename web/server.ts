@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS events (
   image_path  TEXT,
   thumb_path  TEXT,
   sub_path    TEXT,
+  ignored     INTEGER NOT NULL DEFAULT 0,
   created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS camera_config (
@@ -61,6 +62,7 @@ const eventCols = new Set(
   (sqlite.query("PRAGMA table_info(events)").all() as { name: string }[]).map((c) => c.name),
 );
 if (!eventCols.has("sub_path")) sqlite.exec("ALTER TABLE events ADD COLUMN sub_path TEXT");
+if (!eventCols.has("ignored")) sqlite.exec("ALTER TABLE events ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0");
 const db = drizzle(sqlite);
 
 // Fail-open is intentional for local dev, but it is dangerous in production:
@@ -285,21 +287,50 @@ async function serveImage(id: string, variant: "full" | "thumb" | "sub") {
   }
 }
 
+// ── Static SvelteKit SPA (adapter-static) ────────────────────────────────
+// The dashboard UI is a static client build; this server keeps serving the
+// machine + dashboard API and serves the SPA's assets. Client routes without a
+// file extension fall back to index.html so deep links work.
+const WEB_ROOT = process.env.WEB_ROOT ?? `${import.meta.dir}/spa`;
+async function serveSpa(url: URL): Promise<Response | null> {
+  const p = url.pathname;
+  if (
+    p.startsWith("/api/") || p.startsWith("/img/") || p.startsWith("/thumb/") ||
+    p.startsWith("/sub/") || p.startsWith("/live.jpg") || p.startsWith("/live2.jpg") ||
+    p === "/live.mjpg" || p.startsWith("/terminal/")
+  ) return null;
+  const rel = p === "/" ? "/index.html" : p;
+  const file = Bun.file(WEB_ROOT + rel);
+  if (await file.exists()) {
+    const immutable = rel.startsWith("/_app/immutable/");
+    return new Response(file, {
+      headers: { "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache" },
+    });
+  }
+  if (!/\.[a-z0-9]+$/i.test(p)) {
+    return new Response(Bun.file(WEB_ROOT + "/index.html"), {
+      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+    });
+  }
+  return null;
+}
+
 type EventRow = {
   id: string; label: string | null; direction: string | null;
   track_id: number | null; crossed_at: string | null; created_at: string;
-  sub_path: string | null;
+  sub_path: string | null; ignored: number;
 };
 
-type DayEvent = { id: string; label: string; dir: string; track: number | null; ts: string; sub: boolean };
+type DayEvent = { id: string; label: string; dir: string; track: number | null; ts: string; sub: boolean; ign: boolean };
 
 // Day-bucketed IN/OUT counts, shared by the initial page render and
 // GET /api/events so the timeline can auto-refresh without a reload.
+// Rows toggled "ignored" in the timeline are excluded from every total.
 function loadDayStats() {
   const dayExpr = istDay("COALESCE(crossed_at, created_at)");
   const days = sqlite
     .query(`SELECT ${dayExpr} AS d, SUM(direction='in') AS inn, SUM(direction='out') AS outt
-            FROM events GROUP BY d`)
+            FROM events WHERE ignored = 0 GROUP BY d`)
     .all() as { d: string; inn: number; outt: number }[];
   return Object.fromEntries(days.map((d) => [d.d, { in: d.inn ?? 0, out: d.outt ?? 0 }]));
 }
@@ -308,24 +339,24 @@ function loadDayStats() {
 // page makes first paint tiny and day switching snappy even after months of data.
 function loadDay(day: string) {
   const rows = sqlite
-    .query(`SELECT id,label,direction,track_id,crossed_at,created_at,sub_path FROM events
+    .query(`SELECT id,label,direction,track_id,crossed_at,created_at,sub_path,ignored FROM events
             WHERE ${istDay("COALESCE(crossed_at, created_at)")} = ?
             ORDER BY COALESCE(crossed_at, created_at) DESC LIMIT 1000`)
     .all(day) as EventRow[];
   const events: DayEvent[] = rows.map((r) => ({
     id: r.id, label: r.label ?? "", dir: r.direction ?? "", track: r.track_id,
-    ts: r.crossed_at || r.created_at || "", sub: !!r.sub_path,
+    ts: r.crossed_at || r.created_at || "", sub: !!r.sub_path, ign: !!r.ignored,
   }));
   const counts = {
-    in: events.filter((e) => e.dir.toLowerCase() === "in").length,
-    out: events.filter((e) => e.dir.toLowerCase() === "out").length,
+    in: events.filter((e) => !e.ign && e.dir.toLowerCase() === "in").length,
+    out: events.filter((e) => !e.ign && e.dir.toLowerCase() === "out").length,
   };
   return { day, counts, events };
 }
 
 function istTodayCounts() {
   const tcnt = sqlite
-    .query(`SELECT direction, COUNT(*) AS c FROM events WHERE ${istDay("COALESCE(crossed_at, created_at)")} = ${istDay("'now'")} GROUP BY direction`)
+    .query(`SELECT direction, COUNT(*) AS c FROM events WHERE ignored = 0 AND ${istDay("COALESCE(crossed_at, created_at)")} = ${istDay("'now'")} GROUP BY direction`)
     .all() as { direction: string; c: number }[];
   return {
     date: istNow(),
@@ -431,6 +462,11 @@ figcaption .t b{color:var(--text);font-size:17px;font-weight:800;letter-spacing:
 figcaption .t .mm{color:var(--muted);font-size:12px;font-weight:700}
 figcaption a.figsub{font-size:10px;font-weight:700;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 6px;text-decoration:none;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
 figcaption a.figsub:hover{color:var(--blue);border-color:var(--blue)}
+.gallery figure.ign{opacity:.5}
+.gallery figure.ign img{filter:grayscale(1)}
+.igb{display:block;width:100%;border:0;border-top:1px solid var(--line);background:transparent;padding:6px 0;font:inherit;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);cursor:pointer}
+.igb:hover{color:var(--red);background:#fef2f2}
+figure.ign .igb{color:#fff;background:#b91c1c}
 .empty2{color:var(--muted);text-align:center;padding:40px 20px;font-size:13px}
 .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
 .tabbar a{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;text-decoration:none;padding:9px 0 8px;font-size:11px;font-weight:600;color:var(--muted);cursor:pointer}
@@ -668,18 +704,19 @@ function renderList(day, list, counts, headEl, gridEl){
   headEl.innerHTML='<span class="d">'+dayLabel(day)+'</span>';
   function card(e){
     var sub=e.sub?'<a class="figsub" href="/sub/'+encodeURIComponent(e.id)+'" target="_blank" title="Detection frame (substream)">line</a>':'';
-    return '<figure><a href="/img/'+encodeURIComponent(e.id)+'" target="_blank">'+
+    var ign='<button class="igb" data-id="'+encodeURIComponent(e.id)+'" data-ign="'+(e.ign?'1':'0')+'" title="'+(e.ign?'Include this capture in the counts':'Exclude this capture from the counts')+'">'+(e.ign?'Ignored':'Ignore')+'</button>';
+    return '<figure'+(e.ign?' class="ign"':'')+'><a href="/img/'+encodeURIComponent(e.id)+'" target="_blank">'+
       '<img loading="lazy" src="/thumb/'+encodeURIComponent(e.id)+'" alt=""></a>'+
       '<figcaption><span class="lab">'+(e.label||'vehicle')+'</span>'+sub+
-      '<span class="t">'+fmtTime(e.ts)+'</span></figcaption></figure>';
+      '<span class="t">'+fmtTime(e.ts)+'</span></figcaption>'+ign+'</figure>';
   }
   var ins=list.filter(function(e){return e.dir.toLowerCase()==='in';});
   var outs=list.filter(function(e){return e.dir.toLowerCase()==='out';});
   // IN / OUT as tabs so a busy day's captures aren't one enormous page.
   if(dirFilter!=='in')dirFilter='out';
   var seg=document.createElement('div');seg.className='seg';
-  [['in','IN',ins.length],['out','OUT',outs.length]].forEach(function(t){
-    var b=document.createElement('button');b.className=t[0]+(dirFilter===t[0]?' on':'');
+  [['in','IN',ins.filter(function(e){return !e.ign;}).length],['out','OUT',outs.filter(function(e){return !e.ign;}).length]].forEach(function(t){
+    var b=document.createElement('button');b.className=t[0]+(dirFilter===t[0]?' on':'');b.setAttribute('data-dir',t[0]);
     b.innerHTML=t[1]+' <span class="n">'+t[2]+'</span>';
     b.onclick=function(){dirFilter=t[0];renderList(day,list,counts,headEl,gridEl);};
     seg.appendChild(b);
@@ -697,21 +734,24 @@ function renderList(day, list, counts, headEl, gridEl){
   gridEl.appendChild(wrap);
 }
 // Day captures are fetched on demand and cached, so switching between days is
-// instant and we never ship the whole event table to the browser.
+// instant. Stale-while-revalidate: show the cached day immediately (no loading
+// flash) and only rebuild the gallery if the event set actually changed.
 function renderCalDay(){
   var k=selDay||todayKey();
   var cached=dayCache[k];
-  if(cached){renderList(k,cached.events,cached.counts,calHistHead,calDay);return;}
-  calHistHead.innerHTML='';calDay.innerHTML='<div class="empty2">Loading&hellip;</div>';
+  if(cached){renderList(k,cached.events,cached.counts,calHistHead,calDay);}
+  else{calHistHead.innerHTML='';calDay.innerHTML='<div class="empty2">Loading&hellip;</div>';}
   fetch('/api/day?d='+encodeURIComponent(k),{cache:'no-store'})
     .then(function(r){return r.ok?r.json():null;})
-    .then(function(d){if(!d){calDay.innerHTML='<div class="empty2">Could not load</div>';return;}
-      dayCache[k]=d;if((selDay||todayKey())===k)renderList(k,d.events,d.counts,calHistHead,calDay);})
-    .catch(function(){calDay.innerHTML='<div class="empty2">Could not load</div>';});
+    .then(function(d){if(!d){if(!cached)calDay.innerHTML='<div class="empty2">Could not load</div>';return;}
+      var changed=!cached||JSON.stringify(d.events)!==JSON.stringify(cached.events);
+      dayCache[k]=d;
+      if((selDay||todayKey())===k&&changed)renderList(k,d.events,d.counts,calHistHead,calDay);})
+    .catch(function(){if(!cached)calDay.innerHTML='<div class="empty2">Could not load</div>';});
 }
 renderStrip();renderCalDay();
-// Timeline auto-refresh: poll the day counts and re-render only when something
-// actually changed (so images/scroll don't flicker). The live view doesn't need it.
+// Timeline auto-refresh: poll only the day counts / today header. The open day is
+// revalidated (and re-rendered only if its captures changed) — never nuked.
 if(VIEW!=='live'){
   var lastDays=JSON.stringify(DAYS);
   function refreshData(){
@@ -720,11 +760,54 @@ if(VIEW!=='live'){
         if(d.today)setTodayCounts(d.today['in'],d.today.out);
         var ds=JSON.stringify(d.days||{});
         if(ds!==lastDays){lastDays=ds;DAYS=d.days;renderStrip();
-          if(selDay){delete dayCache[selDay];renderCalDay();}}})
+          if(selDay)renderCalDay();}})
       .catch(function(){});
   }
   setInterval(refreshData,8000);
 }
+// Toggle a capture in/out of the IN/OUT totals. Optimistic: updates the card and
+// the tab counts in place and never rebuilds the gallery (so no flicker).
+function updateSegNumbers(events){
+  var seg=calDay.querySelector('.seg');if(!seg)return;
+  var c={
+    in:events.filter(function(e){return e.dir.toLowerCase()==='in'&&!e.ign;}).length,
+    out:events.filter(function(e){return e.dir.toLowerCase()==='out'&&!e.ign;}).length,
+  };
+  Array.prototype.forEach.call(seg.querySelectorAll('button'),function(b){
+    var n=b.querySelector('.n');if(n)n.textContent=c[b.getAttribute('data-dir')];
+  });
+}
+function cacheEvent(id){
+  for(var k in dayCache){var ev=dayCache[k].events||[];for(var i=0;i<ev.length;i++)if(ev[i].id===id)return {day:k,e:ev[i]};}
+  return null;
+}
+function toggleIgnore(btn){
+  var id=decodeURIComponent(btn.getAttribute('data-id'));
+  var ign=btn.getAttribute('data-ign')!=='1';
+  var fig=btn.closest('figure');
+  var hit=cacheEvent(id);
+  function paint(on){
+    if(fig)fig.classList.toggle('ign',on);
+    btn.setAttribute('data-ign',on?'1':'0');
+    btn.textContent=on?'Ignored':'Ignore';
+    btn.title=on?'Include this capture in the counts':'Exclude this capture from the counts';
+    if(hit)updateSegNumbers(dayCache[hit.day].events);
+  }
+  if(hit)hit.e.ign=ign;
+  paint(ign);
+  fetch('/api/ignore',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:id,ignored:ign})})
+    .then(function(r){return r.ok?r.json():null;})
+    .then(function(d){
+      if(!d){if(hit)hit.e.ign=!ign;paint(!ign);return;}
+      fetch('/api/events',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
+        .then(function(x){if(!x)return;if(x.today)setTodayCounts(x.today['in'],x.today.out);DAYS=x.days;renderStrip();})
+        .catch(function(){});})
+    .catch(function(){});
+}
+document.addEventListener('click',function(ev){
+  var b=ev.target&&ev.target.closest?ev.target.closest('.igb'):null;if(!b)return;
+  ev.preventDefault();toggleIgnore(b);
+});
 var setup=document.getElementById('setup'),S2=document.getElementById('snap2'),O=document.getElementById('ov'),msg=document.getElementById('msg');
 document.getElementById('setupBtn').onclick=function(){setup.classList.remove('hidden');S2.src='/live.jpg?'+Date.now();};
 document.getElementById('closeSetup').onclick=function(){setup.classList.add('hidden');};
@@ -944,14 +1027,14 @@ Bun.serve({
       const live_wanted = liveViewers > 0 || Date.now() - liveJpgAt < 10_000;
       const live2_wanted = live2Viewers > 0 || Date.now() - live2JpgAt < 10_000;
       const cnt = sqlite
-        .query("SELECT direction, COUNT(*) AS c FROM events GROUP BY direction")
+        .query("SELECT direction, COUNT(*) AS c FROM events WHERE ignored = 0 GROUP BY direction")
         .all() as { direction: string; c: number }[];
       const allIn = cnt.find((r) => r.direction === "in")?.c ?? 0;
       const allOut = cnt.find((r) => r.direction === "out")?.c ?? 0;
       // Today's totals so the dashboard header can refresh without a reload.
       const dayExpr = istDay("COALESCE(crossed_at, created_at)");
       const tcnt = sqlite
-        .query(`SELECT direction, COUNT(*) AS c FROM events WHERE ${dayExpr} = ${istDay("'now'")} GROUP BY direction`)
+        .query(`SELECT direction, COUNT(*) AS c FROM events WHERE ignored = 0 AND ${dayExpr} = ${istDay("'now'")} GROUP BY direction`)
         .all() as { direction: string; c: number }[];
       const tIn = tcnt.find((r) => r.direction === "in")?.c ?? 0;
       const tOut = tcnt.find((r) => r.direction === "out")?.c ?? 0;
@@ -996,11 +1079,8 @@ Bun.serve({
     // Browser routes — Basic auth
     if (!basicOk(req)) return unauthorized();
 
-    if (url.pathname === "/terminal") {
-      if (!ENABLE_TERMINAL) return new Response("terminal disabled", { status: 404 });
-      return new Response(terminalPage(issueTermToken()), {
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-      });
+    if (url.pathname === "/terminal" && !ENABLE_TERMINAL) {
+      return new Response("terminal disabled", { status: 404 });
     }
     if (url.pathname === "/api/term-token") {
       if (!ENABLE_TERMINAL) return new Response("terminal disabled", { status: 404 });
@@ -1011,6 +1091,23 @@ Bun.serve({
     }
     if (url.pathname.startsWith("/terminal/")) {
       return serveTermAsset(decodeURIComponent(url.pathname.slice("/terminal/".length)));
+    }
+
+    // Toggle an event's "ignored" flag. Ignored captures stay in the timeline
+    // (dimmed, so they can be un-ignored) but drop out of every IN/OUT total.
+    if (url.pathname === "/api/ignore" && req.method === "POST") {
+      let body: { id?: string; ignored?: boolean };
+      try {
+        body = (await req.json()) as { id?: string; ignored?: boolean };
+      } catch {
+        return new Response("bad json", { status: 400 });
+      }
+      const id = String(body.id ?? "");
+      if (!id) return new Response("missing id", { status: 400 });
+      const ignored = body.ignored ? 1 : 0;
+      const info = sqlite.query("UPDATE events SET ignored = ? WHERE id = ?").run(ignored, id);
+      if (!info.changes) return new Response("not found", { status: 404 });
+      return Response.json({ ok: true, id, ignored: !!ignored });
     }
 
     // Day counts for the timeline auto-refresh; the day's captures are pulled
@@ -1103,20 +1200,13 @@ Bun.serve({
     if (url.pathname === "/") return Response.redirect("/live", 302);
     // /calendar was renamed to /timeline; keep old links (and ?day=) working.
     if (url.pathname === "/calendar") return Response.redirect(`/timeline${url.search}`, 302);
-    if (url.pathname === "/live" || url.pathname === "/timeline") {
-      const view = url.pathname.slice(1) as "live" | "timeline";
-      const day = url.searchParams.get("day") ?? url.searchParams.get("d");
-      return new Response(dashboard(view, day), {
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "no-store, no-cache, must-revalidate",
-          "pragma": "no-cache",
-        },
-      });
-    }
     if (url.pathname.startsWith("/img/")) return serveImage(decodeURIComponent(url.pathname.slice(5)), "full");
     if (url.pathname.startsWith("/thumb/")) return serveImage(decodeURIComponent(url.pathname.slice(7)), "thumb");
     if (url.pathname.startsWith("/sub/")) return serveImage(decodeURIComponent(url.pathname.slice(5)), "sub");
+    if (req.method === "GET") {
+      const spa = await serveSpa(url);
+      if (spa) return spa;
+    }
     return new Response("not found", { status: 404 });
   },
 });

@@ -28,6 +28,15 @@ Data leaves the Pi over **HTTPS only** (no SSH). Captures are stored locally and
 only after the VPS acknowledges them, so outages lose nothing. Live frames are relayed the
 same way (outbound POST), and the dashboard is behind HTTP Basic auth.
 
+## Android port (early prototype)
+
+An ARM64 Rust/Android prototype for a screen-off, foreground-service deployment on the Galaxy
+S21 FE is in [`rust_port/`](rust_port/README.md). It includes the Rust tracker/gate primitives,
+an Android wake-lock service, persistent SQLite sync scaffolding and boot recovery. **RTSP,
+H.264 decoding, vehicle inference, and the detector-to-count path are not ported yet**, so this
+prototype does not count vehicles. Follow its device setup and staged soak-test notes before
+using any Android build for continuous operation.
+
 The terminal is the same idea in reverse: `term_agent.py` keeps an **outbound** WebSocket to
 the VPS (`/api/term?role=agent`) and bridges it to a local PTY, so a browser can get a shell
 through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reachable inbound.
@@ -85,7 +94,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/test_crossing.py` | Synthetic crossing-gate regression + annotated re-arm demo video |
 | `tools/set_camera_time.py` | Read/set a camera clock over ONVIF (Manual or NTP) |
 | `tools/onvif_media.py` | Inspect a camera's ONVIF encoder configs / profiles / RTSP URIs (diagnose a blurry substream) |
-| `web/` | Bun dashboard + ingest API (Drizzle + SQLite) |
+| `web/` | SvelteKit (static SPA) dashboard + Bun ingest/reverse-terminal API (Drizzle + SQLite) |
 | `deploy/` | systemd units + env examples for the Pi |
 | `models/yolo26n_ncnn_320x320/` | Production model (fp32 + INT8), ROI-matched input; INT8 calibrated on dumpers |
 | `calib/dumper_trucks/` | INT8 calibration images (dump trucks / tippers / haulers) for the production model |
@@ -169,13 +178,20 @@ to grant more privilege (not recommended).
 
 ## VPS dashboard
 
+The UI is a **static SvelteKit SPA** (`web/`, `@sveltejs/adapter-static`); the Bun API server
+(`web/server.ts`) owns `/api/*`, image serving, and the reverse-terminal WS, and serves the
+SPA's assets (client routes fall back to `index.html`).
+
 ```bash
 cd web
 bun install
+bun run build                 # static SPA -> web/build/
+# deploy: copy web/build/ to WEB_ROOT (default <server.ts dir>/spa) and server.ts alongside
+bun run server.ts
 # env: DB_PATH, CAPTURES_DIR, TRACKER_TOKEN, DASH_USER, DASH_PASS, PORT=3010,
 #      HOST=127.0.0.1, ENABLE_TERMINAL=1 (opt-in reverse shell at /terminal),
-#      CAM2=1 (second raw camera on /live; Pi sets TRACKER_CAM2_URL)
-bun run server.ts
+#      CAM2=1 (second raw camera on /live; Pi sets TRACKER_CAM2_URL),
+#      WEB_ROOT (where the built SPA lives; default: <server.ts dir>/spa)
 ```
 
 Exposed through the Cloudflare Tunnel as `tracker.drnanoinc.com` → `http://localhost:3010`.
@@ -201,11 +217,14 @@ Pages (each its own URL; `/` redirects to `/live`):
   an idle edge streams nothing. Left/right arrows on `/live` switch between Main and Camera 2
   and **only the visible feed is polled** (the idle one's `live_wanted`/`live2_wanted` goes
   stale within ~10 s, so the Pi stops uploading it — half the live data); it always opens on
-  Main.
-- **Timeline data:** the initial page ships only per-day IN/OUT counts (`GET /api/events`,
-  polled every 8 s); a day's captures are fetched on demand from `GET /api/day?d=YYYY-MM-DD`
-  and cached client-side, so first paint stays tiny and switching days is instant.
-  The header counts refresh from `GET /api/config`.
+  Main. The first frame is instant while the pipeline is warm (a `/live.jpg` fetch in the last
+  ~10 s) but ~3.5 s cold, while the Pi notices `live_wanted` on its 3 s config poll.
+- **Timeline data:** the page loads only per-day IN/OUT counts (`GET /api/events`, polled
+  every 8 s); a day's captures are fetched on demand from `GET /api/day?d=YYYY-MM-DD` and
+  cached client-side (stale-while-revalidate), so switching days is instant and never flashes
+  "Loading". The header counts refresh from `GET /api/config`. Each capture has an **Ignore**
+  toggle (`POST /api/ignore`): the card stays in the gallery (dimmed) but drops out of every
+  IN/OUT total, and the toggle is optimistic (in place, no gallery rebuild, no scroll jump).
 
 ### Web terminal (`/terminal`)
 

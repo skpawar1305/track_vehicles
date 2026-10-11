@@ -7,6 +7,9 @@ config.json
 
 # runtime data
 *.log
+rust_port/.gradle/
+rust_port/**/build/
+rust_port/target/
 captures/
 test_captures/
 *.jpg
@@ -42,6 +45,9 @@ models/yolo26n_ncnn_640x640/
 # web
 web/node_modules/
 web/.env
+web/.svelte-kit/
+web/build/
+web/spa/
 
 # legacy
 rust_port/target/

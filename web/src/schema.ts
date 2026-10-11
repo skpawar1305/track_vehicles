@@ -13,5 +13,6 @@ export const events = sqliteTable("events", {
   imagePath: text("image_path"),
   thumbPath: text("thumb_path"),
   subPath: text("sub_path"),
+  ignored: integer("ignored").notNull().default(0),
   createdAt: text("created_at").notNull(),
 });
