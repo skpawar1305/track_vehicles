@@ -1454,12 +1454,6 @@ def draw_gate_overlay(img, line, objects, gate, frame_h, margin_px, scale=1.0):
             cv2.line(img, a, b, (170, 170, 170), 1, cv2.LINE_AA)
     if gate is None:
         return img
-    ux, uy = 1.0, 0.0   # unit vector along the line (for orienting the re-arm shape)
-    if line:
-        ldx, ldy = line[2] - line[0], line[3] - line[1]
-        llen = (ldx * ldx + ldy * ldy) ** 0.5
-        if llen > 1:
-            ux, uy = ldx / llen, ldy / llen
     for obj in objects:
         remaining = gate.rearm_remaining(obj, frame_h)
         armed = not remaining            # None (never crossed) or 0.0 => armed
@@ -1468,19 +1462,9 @@ def draw_gate_overlay(img, line, objects, gate, frame_h, margin_px, scale=1.0):
         if lp is not None:
             ax, ay = int(lp[0] * scale), int(lp[1] * scale)
             r = max(2, int(gate.rearm_frac * frame_h * scale))
-            # Re-arm region drawn as a parallelogram aligned with the line
-            # (was a circle): half-length r along the line, half-width 0.4r
-            # across, skewed 0.3r along the line.
-            sax, say = r * ux, r * uy
-            nbx = 0.4 * r * (-uy) + 0.3 * r * ux
-            nby = 0.4 * r * ux + 0.3 * r * uy
-            quad = np.array([
-                (int(ax + sax + nbx), int(ay + say + nby)),
-                (int(ax - sax + nbx), int(ay - say + nby)),
-                (int(ax - sax - nbx), int(ay - say - nby)),
-                (int(ax + sax - nbx), int(ay + say - nby)),
-            ], dtype=np.int32)
-            cv2.polylines(img, [quad.reshape((-1, 1, 2))], True, col, 1, cv2.LINE_AA)
+            # The re-arm rule is radial (distance from the crossing point), so
+            # draw that true radius as a circle, not a skewed parallelogram.
+            cv2.circle(img, (ax, ay), r, col, 1, cv2.LINE_AA)
             cv2.circle(img, (ax, ay), 3, col, -1, cv2.LINE_AA)
         cx, cy = int(obj.centroid[0] * scale), int(obj.centroid[1] * scale)
         cv2.circle(img, (cx, cy), 3, col, -1, cv2.LINE_AA)
@@ -1979,7 +1963,7 @@ def main():
                 last_live = now_t
                 try:
                     ann = annotate_live(frame, line_px, objects, {"in": c_in, "out": c_out},
-                                        roi=roi_px, flip=cfg.flip_sides,
+                                        roi=(roi_px if cfg.debug_overlay else None), flip=cfg.flip_sides,
                                         gate=(cross_gate if cfg.debug_overlay else None),
                                         margin_px=cfg.cross_margin_frac * h)
                     ok, jpeg = cv2.imencode('.jpg', ann, [cv2.IMWRITE_JPEG_QUALITY, LIVE_QUALITY])
