@@ -269,16 +269,6 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   polygon where the gate **freezes** — no side change commits while the centroid is inside it.
   Place it over the machine's work area. `0.2` confirm distance plus the keep-out together
   neutralise it; the deeper fix is still to move the line off the machine.
-- **Zone-transition counting.** Drawing both an **Entry zone** and an **Exit zone** in Camera
-  setup (`entry_zone`/`exit_zone` in the config, normalized) switches counting from
-  `CrossingGate` to `ZoneGate`: a track is committed to a zone only while its centroid is
-  `TRACKER_CROSS_MARGIN_FRAC` of the frame height *inside* it (the gap between the two zones is
-  the hysteresis), and a committed move from one zone to the other counts once the centroid is
-  `TRACKER_CONFIRM_FRAC` inside the destination. Entry = IN, Exit = OUT; `flip_sides`/`IN side`
-  swaps. This is the robust fix for a working machine (it stays in one zone and never
-  transitions) and for a vehicle that appears already past the line (it must be seen in the
-  other zone first). First sight inside a zone commits without counting. The line remains the
-  fallback when the zones aren't drawn; keep-out still applies. `tools/test_zones.py` covers it.
 - **Overlap alone can suppress a queued follower — hence the centre/size check.** The
   same-direction crossing de-dupe (`TRACKER_CROSS_DEDUP_S` + `TRACKER_DUP_IOU`) collapses the
   two near-identical class-boxes of one vehicle, but two genuinely queued trucks can overlap

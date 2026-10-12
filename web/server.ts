@@ -76,15 +76,13 @@ type CamConfig = {
   line: number[][] | null;
   roi: number[][] | null;
   keepout: number[][] | null;
-  entry_zone: number[][] | null;
-  exit_zone: number[][] | null;
   flip_sides: boolean;
   enabled_classes: number[];
   source_w: number | null;
   source_h: number | null;
 };
 const DEFAULT_CONFIG: CamConfig = {
-  line: null, roi: null, keepout: null, entry_zone: null, exit_zone: null, flip_sides: false,
+  line: null, roi: null, keepout: null, flip_sides: false,
   enabled_classes: [2, 5, 7], source_w: null, source_h: null,
 };
 const TWO_WHEELER_CLASSES = new Set([1, 3]); // COCO bicycle and motorcycle
@@ -1069,8 +1067,6 @@ Bun.serve({
         line: norm(body.line),
         roi: norm(body.roi),
         keepout: norm(body.keepout),
-        entry_zone: norm(body.entry_zone ?? null),
-        exit_zone: norm(body.exit_zone ?? null),
         flip_sides: Boolean(body.flip_sides),
         enabled_classes: Array.isArray(body.enabled_classes)
           ? body.enabled_classes.map(Number).filter((n) => Number.isFinite(n) && !TWO_WHEELER_CLASSES.has(n))
