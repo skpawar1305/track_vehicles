@@ -41,6 +41,12 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   (`Store.requeue_present_images`, throttled by `TRACKER_SYNC_RESYNC_INTERVAL`)
   and re-uploads them — idempotent, since the VPS de-dupes by id. A missing
   image is retried, never silently dropped, until `TRACKER_SYNC_GIVEUP_HOURS`.
+- **A crossing uploads now, not on the next tick.** `run.py` touches
+  `TRACKER_SYNC_NUDGE` (`/tmp/tracker_sync.nudge`) right after a capture is
+  persisted; `sync.py` sleeps in 0.25 s slices and wakes early when the file's
+  mtime changes, so the dashboard count appears in ~1–2 s instead of waiting up
+  to `TRACKER_SYNC_INTERVAL` (20 s). The header polls `/api/config` every 2 s
+  (and on tab focus), so the total lag is a couple of seconds.
 - **Permanent upload errors keep the row.** `sync.py` treats `4xx` as permanent,
   logs it, and records `sync_attempts`/`last_error`; only `2xx` marks synced.
 - **Atomic ingest.** The VPS writes uploads to a temp file then renames, so a

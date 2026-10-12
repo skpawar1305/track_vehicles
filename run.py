@@ -2180,6 +2180,23 @@ _CAPTURE_SESSION = None
 # frame for the full image as well.
 CAPTURE_MAX_AGE = float(os.environ.get("TRACKER_CAPTURE_MAX_AGE", "1.5"))
 
+# sync.py wakes early when this file's mtime changes, so a just-persisted
+# crossing is uploaded within ~a second instead of the next period sync pass.
+SYNC_NUDGE = os.environ.get("TRACKER_SYNC_NUDGE", "/tmp/tracker_sync.nudge")
+
+
+def _nudge_sync():
+    """Wake sync.py so a fresh crossing uploads without waiting a full interval.
+
+    sync.py watches this file's mtime and cuts its sleep short on a change; a
+    failure here is harmless (the periodic pass still carries the event).
+    """
+    try:
+        with open(SYNC_NUDGE, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass
+
 
 def _safe_store_add(store, ev, tries=3):
     """INSERT one event, retrying a briefly-locked DB. Never raises."""
@@ -2211,7 +2228,7 @@ def persist_capture(cfg, capture_mgr, store, item, jpeg):
         print(f"[capture] save failed for ID#{item['track_id']}: {e}", flush=True)
         return None
     cfg.add_capture(entry)
-    _safe_store_add(store, {
+    if _safe_store_add(store, {
         "id": entry["filename"].rsplit(".", 1)[0],
         "track_id": item["track_id"],
         "class_id": item["class_id"],
@@ -2224,7 +2241,8 @@ def persist_capture(cfg, capture_mgr, store, item, jpeg):
         "image_path": entry["filename"],
         "thumb_path": entry["thumb"],
         "sub_path": entry["sub"],
-    })
+    }):
+        _nudge_sync()
     return entry
 
 

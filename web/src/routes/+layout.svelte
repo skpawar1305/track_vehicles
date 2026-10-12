@@ -44,8 +44,17 @@
     };
     poll();
     loadDays();
-    const timer = setInterval(poll, 5000);
-    return () => { clearInterval(clock); clearInterval(timer); };
+    const timer = setInterval(poll, 2000);
+    // Refresh immediately when the tab is refocused, so a count that landed
+    // while the tab was backgrounded shows up the moment you look back.
+    const onVis = () => { if (document.visibilityState === "visible") poll(); };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", poll);
+    return () => {
+      clearInterval(clock); clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", poll);
+    };
   });
 
   // The header LIVE dot only reflects the active /live feed.

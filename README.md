@@ -329,6 +329,11 @@ count or a dead worker is not. Invariants the code upholds:
   300 s) and re-uploads them; the VPS de-dupes by id, so it is idempotent. A
   missing image is *retried*, not silently dropped, until
   `TRACKER_SYNC_GIVEUP_HOURS` (default 24) before it is given up.
+- **A crossing uploads immediately, not on the next tick.** `run.py` touches
+  `TRACKER_SYNC_NUDGE` (`/tmp/tracker_sync.nudge`) the moment a capture is
+  persisted; `sync.py` sleeps in short slices and wakes early on a change, so the
+  dashboard count updates in ~1–2 s instead of waiting up to
+  `TRACKER_SYNC_INTERVAL` (20 s) plus the header poll.
 - **Ingest is atomic.** The VPS writes each uploaded image to a temp file and
   renames it into place, so a crash mid-write can never leave a truncated JPEG
   to be served.

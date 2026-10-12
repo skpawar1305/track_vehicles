@@ -10,6 +10,9 @@ Env:
   TRACKER_DB_PATH        default events.db
   TRACKER_CAPTURE_DIR    default captures
   TRACKER_SYNC_INTERVAL  seconds between passes (default 20)
+  TRACKER_SYNC_NUDGE     file run.py touches when a crossing is persisted; the
+                         sleep wakes early on a change so the upload is near-instant
+                         (default /tmp/tracker_sync.nudge)
   TRACKER_SYNC_RESYNC_INTERVAL  seconds between self-heal sweeps (default 300)
   TRACKER_SYNC_GIVEUP_HOURS     drop a pending row whose image never appears
                                 (default 24)
@@ -89,6 +92,31 @@ def delete_local(capture_dir, ev):
             pass
 
 
+def _nudge_mtime(path):
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return 0.0
+
+
+def _sleep_or_nudge(interval, nudge_path, seen):
+    """Sleep up to `interval` s, waking early when the nudge file changes.
+
+    run.py touches the nudge the moment a crossing is persisted, so the upload
+    happens in well under the interval instead of waiting for the next tick.
+    Returns the (possibly updated) nudge mtime to compare against next time.
+    """
+    deadline = time.time() + interval
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return seen
+        time.sleep(min(0.25, remaining))
+        m = _nudge_mtime(nudge_path)
+        if m and m != seen:
+            return m
+
+
 def _age_hours(ev, now=None):
     """Age of an event in hours (0 if the timestamp is missing/unparseable)."""
     ts = ev.get("crossed_at") or ev.get("synced_at")
@@ -141,12 +169,14 @@ def main():
     capture_dir = env("TRACKER_CAPTURE_DIR", "captures")
     db_path = env("TRACKER_DB_PATH", "events.db")
     interval = float(env("TRACKER_SYNC_INTERVAL", "20"))
+    nudge_path = env("TRACKER_SYNC_NUDGE", "/tmp/tracker_sync.nudge")
     resync_interval = float(env("TRACKER_SYNC_RESYNC_INTERVAL", "300"))
     giveup_hours = float(env("TRACKER_SYNC_GIVEUP_HOURS", "24"))
 
     store = Store(db_path)
     print(f"[sync] API {api_url} -> {capture_dir} (db {db_path})")
     last_resync = 0.0
+    seen_nudge = _nudge_mtime(nudge_path)
     while True:
         try:
             # Self-heal rows falsely marked synced: a successful upload deletes
@@ -167,7 +197,7 @@ def main():
             print(f"[sync] done, {sent} sent")
             return
         if sent == 0:
-            time.sleep(interval)
+            seen_nudge = _sleep_or_nudge(interval, nudge_path, seen_nudge)
         # if we sent a full batch, loop immediately to drain the backlog
 
 
