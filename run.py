@@ -141,6 +141,11 @@ DUP_IOU = float(os.environ.get("TRACKER_DUP_IOU", "0.6"))
 # A duplicate crossing from a different track within this window (and overlapping
 # the previous box) is suppressed. 0 disables the safety net.
 CROSS_DEDUP_S = float(os.environ.get("TRACKER_CROSS_DEDUP_S", "1.0"))
+# Overlap alone can also suppress a genuinely separate vehicle queued right
+# behind another. So the de-dupe additionally demands the two boxes be the *same
+# vehicle*: their centres within this fraction of the frame width AND their
+# areas within a 2x ratio. A follower's centre is further away, so it survives.
+DEDUP_CENTER_FRAC = float(os.environ.get("TRACKER_DEDUP_CENTER_FRAC", "0.03"))
 # Evidence: the saved image is the camera's main-profile ONVIF snapshot (the
 # camera encodes the JPEG, so no Pi decode) and the thumbnail is always built
 # from the substream crossing frame, so the timeline shows the vehicle at the
@@ -187,6 +192,18 @@ class Config:
         # can commit. A vehicle that only drifts back and forth at the line
         # never re-arms, so it is counted once (see CrossingGate).
         self.cross_rearm_frac = float(os.environ.get("TRACKER_CROSS_REARM_FRAC", "0.2"))
+        # Confirmed transit: a crossing only *counts* once the centroid reaches
+        # this fraction of the frame height past the line — deeper than the
+        # hysteresis margin — so a machine oscillating on the line (or a bbox
+        # refit that flicks the centroid across) never commits. A return before
+        # the confirm distance cancels the pending crossing. 0 disables it
+        # (legacy: count as soon as the margin is cleared).
+        self.cross_confirm_frac = float(os.environ.get("TRACKER_CONFIRM_FRAC", "0.2"))
+        # No-count polygon (normalized). Crossings are frozen while the centroid
+        # is inside it — e.g. the excavator/loader's working area. Pi-local, set
+        # from config.json; a remote config may also provide it.
+        self.keepout = None       # legacy pixel coords
+        self.norm_keepout = None  # normalized [[x,y],...] (0..1)
         # ncnn inference threads; also read from config.json so it can be lowered
         # on-device (heat/CPU) without editing the root-owned tracker.env.
         self.threads = int(os.environ.get("TRACKER_THREADS", str(NUM_THREADS)))
@@ -240,6 +257,8 @@ class Config:
                 self.roi = data.get("roi")
                 self.norm_line = data.get("norm_line")
                 self.norm_roi = data.get("norm_roi")
+                self.keepout = data.get("keepout")
+                self.norm_keepout = data.get("norm_keepout")
                 self.conf_thresh = data.get("conf_thresh", 0.5)
                 self.flip_sides = data.get("flip_sides", False)
                 self.capture_dir = os.environ.get(
@@ -252,6 +271,8 @@ class Config:
                 self.debug_overlay = bool(data.get("debug_overlay", self.debug_overlay))
                 self.cross_rearm_frac = float(
                     data.get("cross_rearm_frac", self.cross_rearm_frac))
+                self.cross_confirm_frac = float(
+                    data.get("cross_confirm_frac", self.cross_confirm_frac))
                 self.model = data.get("model", self.model)
                 self.model_imgsz = data.get("model_imgsz", self.model_imgsz)
                 self.int8 = bool(data.get("int8", self.int8))
@@ -283,12 +304,14 @@ class Config:
         with self.lock:
             data = {"stream_url": self.stream_url, "line": self.line, "roi": self.roi,
                     "norm_line": self.norm_line, "norm_roi": self.norm_roi,
+                    "keepout": self.keepout, "norm_keepout": self.norm_keepout,
                     "conf_thresh": self.conf_thresh, "flip_sides": self.flip_sides,
                     "capture_dir": self.capture_dir, "max_captures": self.max_captures,
                     "enabled_classes": self.enabled_classes, "relay": self.relay,
                     "threads": self.threads,
                     "debug_overlay": self.debug_overlay,
                     "cross_rearm_frac": self.cross_rearm_frac,
+                    "cross_confirm_frac": self.cross_confirm_frac,
                     "model": self.model,
                     "model_imgsz": self.model_imgsz,
                     "int8": self.int8,
@@ -323,6 +346,12 @@ class Config:
         with self.lock:
             self.norm_line = data.get("line")
             self.norm_roi = data.get("roi")
+            # A remote config may carry a keep-out polygon; only overwrite the
+            # Pi-local one when it actually provides coordinates (the VPS config
+            # has no drawing UI for it, so it usually sends nothing).
+            if data.get("keepout"):
+                self.norm_keepout = data["keepout"]
+                self.keepout = None
             self.flip_sides = bool(data.get("flip_sides", False))
             if data.get("enabled_classes"):
                 self.enabled_classes = _counting_classes(data["enabled_classes"])
@@ -341,6 +370,12 @@ class Config:
             if self.norm_roi and len(self.norm_roi) >= 3:
                 return [[int(p[0] * w), int(p[1] * h)] for p in self.norm_roi]
             return self.roi
+
+    def pixel_keepout(self, w, h):
+        with self.lock:
+            if self.norm_keepout and len(self.norm_keepout) >= 3:
+                return [[int(p[0] * w), int(p[1] * h)] for p in self.norm_keepout]
+            return self.keepout
     def reset_counts(self):
         with self.lock: self.captures.clear()
         self.save()
@@ -390,6 +425,23 @@ def box_iou(a, b):
     return inter / denom if denom > 0 else 0.0
 
 
+def same_vehicle_box(a, b, frame_w):
+    """True when two crossing boxes are almost certainly one vehicle detected as
+    two class-boxes — near-identical position AND size — rather than two
+    genuinely separate vehicles (a queue) whose centres differ. Used to gate the
+    same-direction crossing de-dupe so a following truck is not suppressed."""
+    if frame_w <= 0:
+        return True   # no scale to judge by: fall back to IoU-only
+    cxa, cya = (a[0] + a[2]) / 2.0, (a[1] + a[3]) / 2.0
+    cxb, cyb = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+    if ((cxa - cxb) ** 2 + (cya - cyb) ** 2) ** 0.5 > DEDUP_CENTER_FRAC * frame_w:
+        return False
+    area_a = max(1.0, (a[2] - a[0]) * (a[3] - a[1]))
+    area_b = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+    ratio = area_a / area_b
+    return 0.5 <= ratio <= 2.0
+
+
 def detect_crossing(line, old_centroid, new_centroid, flip=False):
     if line is None or old_centroid is None or new_centroid is None:
         return CROSSING_NONE
@@ -403,16 +455,34 @@ def detect_crossing(line, old_centroid, new_centroid, flip=False):
         return CROSSING_IN if new_side == 1 else CROSSING_OUT
     return CROSSING_NONE
 
+def point_in_poly(poly, point):
+    """True when ``point`` lies inside the polygon ``poly`` (list of [x, y])."""
+    if not poly or len(poly) < 3 or point is None:
+        return False
+    pts = np.asarray(poly, dtype=np.float32)
+    return cv2.pointPolygonTest(pts, (float(point[0]), float(point[1])), False) >= 0
+
+
 class CrossingGate:
-    """Committed-side line crossing with hysteresis and a single re-arm guard.
+    """Committed-side line crossing with hysteresis and a confirmed transit.
 
     ``update()`` is the whole rule set. A track commits to the side of the line
-    it is first seen on; a flip counts only when the centroid lands
-    ``margin_frac`` of the frame height past the line, *inside* the drawn
-    segment, is at least ``min_age`` frames old, and has moved ``rearm_frac`` of
-    the frame height away from the point of its previous crossing. So a machine
-    that wobbles on the line (or creeps a little past it) never re-counts, while
-    a genuine pass-through that later returns still counts again.
+    it is first seen on. A crossing is only *counted* once the centroid lands
+    ``confirm_frac`` of the frame height past the line — deeper than the
+    hysteresis ``margin_frac`` — inside the drawn segment, on the opposite side
+    to the committed one, at least ``min_age`` frames old, and ``rearm_frac`` of
+    the frame height away from the point of the previous crossing. Short of
+    that the crossing is only *pending*: a return toward the original side
+    before it reaches the confirm distance cancels it. So a machine wobbling on
+    the line (or oscillating under the confirm distance) never counts, while a
+    genuine pass-through — and a genuine later return — does.
+
+    When the centroid is inside ``keepout`` (the working-machine area) no side
+    change is committed at all, so a loader/excavator parked on the line can
+    never manufacture a crossing.
+
+    ``confirm_frac=0`` reproduces the legacy behaviour (count as soon as the
+    margin is cleared).
 
     Returns CROSSING_NONE, CROSSING_IN, CROSSING_OUT, or CROSSING_BLOCKED — the
     last is a real cross the age/re-arm guard refused, kept only so the caller
@@ -420,42 +490,66 @@ class CrossingGate:
     """
 
     def __init__(self, min_age=4, margin_frac=0.06, rearm_frac=0.2,
-                 seg_tol=0.02):
+                 confirm_frac=0.2, seg_tol=0.02, keepout=None):
         self.min_age = min_age
         self.margin_frac = margin_frac
         self.rearm_frac = rearm_frac
+        self.confirm_frac = confirm_frac   # 0 disables the confirmed transit
         self.seg_tol = seg_tol
+        self.keepout = keepout             # pixel polygon [[x,y],...] or None
         self.last_pt = {}     # tid -> centroid where the last crossing committed
         self.side = {}        # tid -> last committed side (+1/-1) outside the band
+        self.pending = {}     # tid -> side awaiting confirmation (diagnostics)
 
     def drop(self, dead_ids):
         for tid in dead_ids:
             self.last_pt.pop(tid, None)
             self.side.pop(tid, None)
+            self.pending.pop(tid, None)
 
     def update(self, line, obj, flip=False, frame_h=360):
+        if point_in_poly(self.keepout, obj.centroid):
+            # Inside the no-count work area: freeze, so a machine working there
+            # can neither commit a crossing nor disturb the committed side.
+            return CROSSING_NONE
         dist, t = line_geometry(line, obj.centroid)
+        if dist is None:
+            return CROSSING_NONE
         margin = self.margin_frac * frame_h
-        if dist is None or abs(dist) < margin:
-            # Inside the hysteresis band: not a crossing.
+        if abs(dist) < margin:
+            # Inside the hysteresis band: not a crossing. Returning to the line
+            # cancels any pending crossing (the track came back).
+            self.pending.pop(obj.track_id, None)
             return CROSSING_NONE
         new_side = 1 if dist >= 0 else -1
         prev = self.side.get(obj.track_id)
         if prev is None or prev == new_side:
             # First sight, or still on the same committed side.
             self.side[obj.track_id] = new_side
+            self.pending.pop(obj.track_id, None)
             return CROSSING_NONE
         if t < -self.seg_tol or t > 1 + self.seg_tol:
             # Crossed the infinite line, but outside the drawn segment: take the
             # new side without counting.
             self.side[obj.track_id] = new_side
+            self.pending.pop(obj.track_id, None)
+            return CROSSING_NONE
+        # Candidate crossing: on the opposite side to the committed one. In
+        # confirmed mode the centroid must reach confirm_frac past the line
+        # before it counts; short of that it only becomes pending, and a return
+        # to the original side (or into the band) cancels it.
+        confirm = self.confirm_frac * frame_h if self.confirm_frac > 0 else margin
+        if abs(dist) < confirm:
+            self.pending[obj.track_id] = new_side
             return CROSSING_NONE
         # A genuine cross. Commit only if the track is old enough and has
         # re-armed away from its previous crossing; otherwise leave the side
         # unchanged so the cross can still commit on a later frame.
         if obj.age < self.min_age or self.rearm_remaining(obj, frame_h):
+            self.pending[obj.track_id] = new_side
             return CROSSING_BLOCKED
         self.side[obj.track_id] = new_side
+        self.pending.pop(obj.track_id, None)
         self.last_pt[obj.track_id] = (float(obj.centroid[0]), float(obj.centroid[1]))
         if flip:
             return CROSSING_OUT if new_side == 1 else CROSSING_IN
@@ -1648,12 +1742,15 @@ def draw_gate_overlay(img, line, objects, gate, frame_h, margin_px, scale=1.0):
 
 
 def annotate_live(frame, line, objects, counts, target_h=LIVE_HEIGHT, roi=None, flip=False,
-                  gate=None, margin_px=0.0):
+                  gate=None, margin_px=0.0, keepout=None):
     """Downscale to the target height and draw a crisp overlay (boxes scaled to match)."""
     h, w = frame.shape[:2]
     s = target_h / h if h > target_h else 1.0
     img = (cv2.resize(frame, (max(1, int(w * s)), target_h), interpolation=cv2.INTER_AREA)
            if s < 1.0 else frame.copy())
+    if keepout is not None and len(keepout) >= 3:
+        pts = np.array([[int(p[0] * s), int(p[1] * s)] for p in keepout], dtype=np.int32)
+        cv2.polylines(img, [pts.reshape((-1, 1, 2))], True, (60, 60, 220), 1, cv2.LINE_AA)
     if roi is not None and len(roi) >= 3:
         pts = np.array([[int(p[0] * s), int(p[1] * s)] for p in roi], dtype=np.int32)
         cv2.polylines(img, [pts.reshape((-1, 1, 2))], True, (100, 180, 255), 1, cv2.LINE_AA)
@@ -1978,7 +2075,7 @@ def main():
     # at ~25 fps this is a standard IoU tracker; across a stream stall the box is
     # extrapolated forward so a constant-velocity detection still overlaps.
     tracker     = CentroidTracker(
-        max_age=int(os.environ.get("TRACKER_TRACK_MAX_AGE", "25")),
+        max_age=int(os.environ.get("TRACKER_TRACK_MAX_AGE", "40")),
         iou_gate=float(os.environ.get("TRACKER_IOU_GATE", "0.2")),
         assoc_frac=float(os.environ.get("TRACKER_ASSOC_FRAC", "0.2")),
         gap_frac=float(os.environ.get("TRACKER_ASSOC_GAP_FRAC", "0.5")),
@@ -1998,7 +2095,8 @@ def main():
     last_stats_str  = ""
     cross_gate      = CrossingGate(min_age=cfg.min_track_age,
                                    margin_frac=cfg.cross_margin_frac,
-                                   rearm_frac=cfg.cross_rearm_frac)
+                                   rearm_frac=cfg.cross_rearm_frac,
+                                   confirm_frac=cfg.cross_confirm_frac)
 
     latest = LatestFrame()
     shared = {"dets": [], "counter": 0, "lock": threading.Lock()}
@@ -2106,6 +2204,11 @@ def main():
             h, w = frame.shape[:2]
             line_px = cfg.pixel_line(w, h)
             roi_px  = cfg.pixel_roi(w, h)
+            # Refresh the gate's tunables/polygon each frame so a config change
+            # (or the frame size) is picked up without a restart.
+            cross_gate.keepout = cfg.pixel_keepout(w, h)
+            cross_gate.confirm_frac = cfg.cross_confirm_frac
+            cross_gate.rearm_frac = cfg.cross_rearm_frac
 
             if fresh:
                 if prev_frame_t and now_t - prev_frame_t > 2.5:
@@ -2147,7 +2250,8 @@ def main():
                     ann = annotate_live(frame, line_px, objects, {"in": c_in, "out": c_out},
                                         roi=(roi_px if cfg.debug_overlay else None), flip=cfg.flip_sides,
                                         gate=(cross_gate if cfg.debug_overlay else None),
-                                        margin_px=cfg.cross_margin_frac * h)
+                                        margin_px=cfg.cross_margin_frac * h,
+                                        keepout=(cross_gate.keepout if cfg.debug_overlay else None))
                     ok, jpeg = cv2.imencode('.jpg', ann, [cv2.IMWRITE_JPEG_QUALITY, LIVE_QUALITY])
                     if ok:
                         try: live_q.put_nowait(jpeg.tobytes())
@@ -2165,7 +2269,8 @@ def main():
                 temp_c = _cpu_temp()
                 print(f"[stat] track={track_fps:.1f} fps  detect={detect_fps:.1f} fps  "
                       f"tracks={len(objects)}  temp={temp_c:.1f}C  "
-                      f"rearm_block={n_rearm_block} dedup_block={n_dedup_block}")
+                      f"rearm_block={n_rearm_block} dedup_block={n_dedup_block} "
+                      f"pending={len(cross_gate.pending)}")
                 payload = {
                     "track_fps": round(float(track_fps), 1),
                     "detect_fps": round(float(detect_fps), 1),
@@ -2173,6 +2278,7 @@ def main():
                     "temp_c": None if temp_c != temp_c else round(float(temp_c), 1),
                     "in": int(c_in), "out": int(c_out),
                     "rearm_block": int(n_rearm_block), "dedup_block": int(n_dedup_block),
+                    "pending": int(len(cross_gate.pending)),
                 }
                 _write_stats(payload)
                 if cfg.stats_url:
@@ -2208,6 +2314,7 @@ def main():
                     recent_cross = [rc for rc in recent_cross
                                     if now_t - rc[0] <= CROSS_DEDUP_S]
                     if any(rc[1] == crossing and box_iou(obj.bbox, rc[2]) > DUP_IOU
+                           and same_vehicle_box(obj.bbox, rc[2], w)
                            for rc in recent_cross):
                         if debug:
                             print(f"[dbg] #{obj.track_id} duplicate crossing "

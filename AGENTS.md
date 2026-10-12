@@ -174,10 +174,11 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   double count. `YoloNcnn._merge_cross_class` runs a **class-agnostic NMS** at
   `TRACKER_DUP_IOU` (default 0.6) after the per-class pass — this is the
   Ultralytics `agnostic_nms` equivalent. A crossing-level de-dupe safety net
-  (same direction, IoU > `TRACKER_DUP_IOU`, within `TRACKER_CROSS_DEDUP_S`,
-  default 1 s) guarantees one vehicle = one event. Do **not** try to fix this in
-  the tracker: it is a detector problem, and any tracker would mint two tracks from
-  two boxes.
+  (same direction, IoU > `TRACKER_DUP_IOU`, **and `same_vehicle_box`** — centres
+  within `TRACKER_DEDUP_CENTER_FRAC` and areas within 2x, so a queued follower is
+  not collapsed — within `TRACKER_CROSS_DEDUP_S`, default 1 s) guarantees one
+  vehicle = one event. Do **not** try to fix this in the tracker: it is a detector
+  problem, and any tracker would mint two tracks from two boxes.
 - **NanoDet can merge a vehicle into a lingering "container" box — drop by containment.**
   The `nanodet`/`opencv` detectors (`config.json` `"detector"`) sometimes emit a loose box
   around a vehicle — or spanning two adjacent trucks — whose IoU with the tight box is low,
@@ -236,27 +237,45 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   tracked vehicle whose box changed shape/speed so IoU misses is still re-acquired by
   proximity. Sort key is `(tier, cost)`, so every IoU match beats any fallback and the best
   per-tier match is chosen (greedy; `bytetracker` is not used — only the dev harnesses).
-- **The crossing gate is exactly two rules: hysteresis + re-arm.** Earlier versions stacked
-  min-age + min-travel-from-birth + cooldown + a 15-frame refractory + this same re-arm; the
-  extra gates were either redundant or wrong (net-travel from *birth* never constrains a
-  reversal), so they were removed. What remains, in `CrossingGate`:
-  * **hysteresis:** `crossing()` commits a track to a side the first time it is seen and only
-    *candidates* a flip when the centroid emerges >= `TRACKER_CROSS_MARGIN_FRAC` of the frame
-    height past the line, within the drawn segment. `allow()` commits the candidate, so a
-    rejected candidate leaves the track on its old side. Flipping eagerly (the old bug) armed
-    the next micro-crossing in the opposite direction, so a parked/working machine on the line
-    alternated IN/OUT.
+- **The crossing gate is three rules: hysteresis + confirmed transit + re-arm.** Earlier
+  versions stacked min-age + min-travel-from-birth + cooldown + a 15-frame refractory + this
+  same re-arm; the extra gates were either redundant or wrong (net-travel from *birth* never
+  constrains a reversal), so they were removed. What remains, in `CrossingGate.update()`:
+  * **hysteresis:** a track commits to a side the first time it is seen and only *candidates*
+    a flip when the centroid emerges >= `TRACKER_CROSS_MARGIN_FRAC` of the frame height past
+    the line, within the drawn segment. A rejected candidate leaves the track on its old side.
+  * **confirmed transit:** the candidate only *counts* once the centroid reaches
+    `TRACKER_CONFIRM_FRAC` (0.2) of the frame height past the line — *deeper* than the
+    hysteresis margin, on the opposite side. Short of that it is only *pending*; a return
+    toward the original side (or into the band) cancels it. This is what kills the ~1 s
+    opposite-direction double-counts: clearing the tiny 0.06 band is no longer enough to
+    commit, so a working machine's swing (or a bbox refit that flicks the centroid across)
+    never produces an OUT/IN pair. `0` restores the legacy "count at the margin".
   * **re-arm:** after a committed crossing the track must move `TRACKER_CROSS_REARM_FRAC`
-    (0.2) of the frame height *away from the crossing point* (`last_pt` + `rearm_remaining`,
-    checked in `allow()`) before another flip may commit. A vehicle that only drifts at the
-    line never re-arms; a real pass-through moves far enough that a later genuine return still
-    counts. `0` disables it (reproduces the bug).
-  `min_age` is the only other gate (both the run.py pre-filter and inside `allow()`); it is
-  not a travel/cooldown heuristic. `tools/test_crossing.py` asserts wobble=1, passthru=1,
-  true-return=2, and nudge(0.2)=1 / nudge(0.15)>1; don't regress.
+    (0.2) of the frame height *away from the crossing point* (`last_pt` + `rearm_remaining`)
+    before another flip may commit. `0` disables it.
+  `min_age` is the only other gate (the run.py pre-filter and inside `update()`); it is not a
+  travel/cooldown heuristic. `tools/test_crossing.py` asserts wobble=1, passthru=1,
+  true-return=2, nudge=1, rapid-reversal=0, and a queued pair=2; don't regress.
 - **Don't confuse the re-arm distance with the margin.** `0.15` was too small on this site: a
   slow dumper that overshot the line by ~55px re-armed and re-counted (`id6 out/in`, 12:54).
   `0.2` (72px on 360p) covers that swing without missing real returns.
+- **The excavator working on the line is the durable false-count source; use the keep-out.**
+  The 2026-10-12 14:12 `id275 out` 14:12:55 → `id275 in` 14:12:56 pair was a JCB backhoe
+  loader swinging its arm across the line (both evidence frames show it, boom extended): one
+  machine oscillation committed two opposite crossings a second apart (net zero, but each
+  bumps the totals). `norm_keepout` in `config.json` is a polygon where the gate **freezes** —
+  no side change commits while the centroid is inside it. Place it over the machine's work
+  area. `0.2` confirm distance plus the keep-out together neutralise it; the deeper fix is
+  still to move the line off the machine.
+- **Overlap alone can suppress a queued follower — hence the centre/size check.** The
+  same-direction crossing de-dupe (`TRACKER_CROSS_DEDUP_S` + `TRACKER_DUP_IOU`) collapses the
+  two near-identical class-boxes of one vehicle, but two genuinely queued trucks can overlap
+  too. `same_vehicle_box()` therefore also requires the centres within
+  `TRACKER_DEDUP_CENTER_FRAC` (0.03) of the frame width AND areas within a 2x ratio, so a
+  follower (different centre) still counts. `TRACKER_TRACK_MAX_AGE` was raised 25 → 40 so a
+  briefly occluded truck keeps its id (and gate history) instead of being reminted already
+  past the line (a guaranteed under-count).
 - **The margin must exceed the detector's box-refit wobble.** A stationary vehicle parked
   *on* the line is the pathological case: YOLO re-fits the box as its parts move (an
   excavator's arm swings in/out of the `truck` box), which drags the centroid tens of px
