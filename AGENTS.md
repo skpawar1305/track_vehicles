@@ -326,14 +326,16 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   cuts the live preview to ~9 fps. Select it without root via
   `config.json` `{"model":"yolo26n","model_imgsz":"640x640","int8":true}` (the model
   dir must exist); revert `model_imgsz` to `320x320` to go back.
-- **Current production detector: NanoDet-Plus fp32 — the site's chosen best.** Set via
+- **Current production detector: NanoDet-Plus-m @416 (ncnn, fp16).** Set via
   `/opt/tracker/config.json` → `"detector": "nanodet"`, `"dnn_model":
-  "/opt/tracker/models/nanodet_plus_m_1.5x_416.ncnn.param"` (fp32 ncnn graph, 416 input,
-  COCO 80 classes, container suppression in `NanoDetNcnn`). Measured ~15 `detect_fps` at
-  ~75 °C on the Pi 5 substream. The **code default is `hybrid`** (motion-gated YOLO26n
-  INT8 `320x320`), and `opencv` is the ONNX `cv2.dnn` NanoDet variant (~12 fps) — switch
-  `detector`/`dnn_model` in `config.json` to change without editing the root-owned
-  `tracker.env`.
+  "/opt/tracker/models/nanodet_plus_m_416.ncnn.param"` (RangiLyu's official
+  `nanodet-plus-m_416_ncnn.zip`: 1.52 GFLOPs, 30.4 mAP, COCO 80 classes, container
+  suppression in `NanoDetNcnn`). Measured ~19 `detect_fps` at ~74 °C on the Pi 5
+  substream (the heavier 1.5x-416 — 2.97 GFLOPs / 34.1 mAP — was ~15). `NanoDetNcnn`
+  reads the input/output blob names from the `.param` (`data`/`output` for the official
+  export, `in0`/`out0` for the older one). The **code default is `hybrid`** (motion-gated
+  YOLO26n INT8 `320x320`), and `opencv` is the ONNX `cv2.dnn` variant (~12 fps) — switch
+  `detector`/`dnn_model` in `config.json` to change without editing `tracker.env`.
 - `ncnn`'s wheel declares the GUI `opencv-python` (needs libxcb); first-boot.sh replaces
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads

@@ -628,6 +628,36 @@ _STD  = np.array([57.375,  57.12,  58.395], dtype=np.float32)
 _STRIDES = [8, 16, 32, 64]
 _INPUT_SIZE = 416
 
+
+def _ncnn_io_names(param_path):
+    """Return (input_blob, output_blob) for an ncnn .param.
+
+    ncnn exports name the blobs inconsistently (RangiLyu's NanoDet release uses
+    ``data``/``output``; our earlier export used ``in0``/``out0``), so read them
+    from the graph: input = blob produced by the ``Input`` layer; output = blob
+    produced but never consumed.
+    """
+    produced, consumed, inp = [], set(), None
+    try:
+        with open(param_path) as f:
+            lines = f.read().splitlines()
+        for ln in lines[2:]:
+            t = ln.split()
+            if len(t) < 4:
+                continue
+            typ, bc, tc = t[0], int(t[2]), int(t[3])
+            bottoms = t[4:4 + bc]
+            tops = t[4 + bc:4 + bc + tc]
+            consumed.update(bottoms)
+            produced.extend(tops)
+            if typ == "Input" and tops:
+                inp = tops[0]
+    except (OSError, ValueError, IndexError):
+        pass
+    outs = [b for b in produced if b not in consumed]
+    return inp or "in0", (outs[-1] if outs else "out0")
+
+
 class NanoDetNcnn:
     def __init__(self, model_param=MODEL_PARAM, model_bin=None, conf_thresh=0.5,
                  iou_thresh=0.45, num_threads=NUM_THREADS):
@@ -645,8 +675,7 @@ class NanoDetNcnn:
         self.net.opt.num_threads = num_threads
         self.net.load_param(model_param)
         self.net.load_model(model_bin)
-        self.input_name  = "in0"
-        self.output_name = "out0"
+        self.input_name, self.output_name = _ncnn_io_names(model_param)
         priors = []
         for stride in _STRIDES:
             h = int(np.ceil(_INPUT_SIZE / stride))

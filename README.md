@@ -107,7 +107,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/set_encoder.py` | Read/set a camera's ONVIF encoder (resolution/bitrate/GOP/fps/quality); dry-run by default |
 | `web/` | SvelteKit (static SPA) dashboard + Bun ingest/reverse-terminal API (Drizzle + SQLite) |
 | `deploy/` | systemd units + env examples for the Pi |
-| `models/nanodet_plus_m_1.5x_416.ncnn.*` | **Current production detector** — NanoDet-Plus fp32, 416 input, COCO 80 classes |
+| `models/nanodet_plus_m_416.ncnn.*` | **Current production detector** — NanoDet-Plus-m fp16, 416 input, COCO 80 classes (RangiLyu release) |
 | `models/yolo26n_ncnn_320x320/` | YOLO26n ncnn (fp32 + INT8), the `hybrid` code-default model; INT8 calibrated on dumpers |
 | `calib/dumper_trucks/` | INT8 calibration images (dump trucks / tippers / haulers) for the production model |
 
@@ -349,11 +349,11 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
 `256x256` ≈ 46 (smaller = faster, lower confidence). `run.py` logs
 `[stat] track=<fps> detect=<fps> tracks=<n>` every 10 s so the split is visible on-device.
 
-**Current production detector = `nanodet` → `NanoDetNcnn` with the NanoDet-Plus fp32
-`416` model (`models/nanodet_plus_m_1.5x_416.ncnn`).** Selected in `config.json`
-(`"detector": "nanodet"`); measured ~15 `detect_fps` on the Pi 5. The code default is
-`hybrid` (motion-gated YOLO26n INT8 `320x320`), and `opencv` is the ONNX `cv2.dnn`
-NanoDet variant (~12 fps).
+**Current production detector = `nanodet` → `NanoDetNcnn` with the NanoDet-Plus-m `416`
+model (RangiLyu's official `nanodet-plus-m_416_ncnn`, 1.52 GFLOPs, 30.4 mAP).** Selected
+in `config.json` (`"detector": "nanodet"`); measured ~19 `detect_fps` on the Pi 5. The
+code default is `hybrid` (motion-gated YOLO26n INT8 `320x320`), and `opencv` is the ONNX
+`cv2.dnn` variant (~12 fps).
 
 ## Gotchas
 
