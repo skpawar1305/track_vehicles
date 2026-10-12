@@ -48,7 +48,10 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 - **Input is a camera sub-stream** (ONVIF path `.../Streaming/Channels/102`, 640x360
   H.264). It is cheaper to decode than the 1080p main stream and — because it is already
   640 wide — gives better small-object recall than downscaling 1080p. Cameras that demand
-  SHA-256 RTSP Digest are reached through `rtsp_relay.py` (see Gotchas).
+  SHA-256 RTSP Digest are reached through `rtsp_relay.py` (see Gotchas). The reader runs
+  **unpaced** so it stays at the live edge; the header shows `stream_fps` (frames actually
+  delivered) — the NVR repeats frames on a static scene, and detect/track skip repeats, so
+  `detect_fps` dips when idle while `stream_fps` stays ~25.
 - **Motion latch.** A cheap MOG2 + frame-difference gate *arms* detection: the moment
   motion is seen, YOLO runs on every frame for `TRACKER_MOTION_HOLD` seconds (default 60).
   A **heartbeat** (`TRACKER_MOTION_HEARTBEAT`, default 3 s) still runs YOLO periodically

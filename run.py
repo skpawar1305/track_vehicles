@@ -1778,6 +1778,7 @@ class LatestFrame:
         self._frame = None
         self.seq = 0
         self.fresh = True
+        self.stream_fps = 0.0          # reader's actual delivered fps
 
     def put(self, frame, fresh=True):
         with self._lock:
@@ -1788,6 +1789,14 @@ class LatestFrame:
     def get(self):
         with self._lock:
             return self._frame, self.seq, self.fresh
+
+    def set_stream_fps(self, fps):
+        with self._lock:
+            self.stream_fps = fps
+
+    def get_stream_fps(self):
+        with self._lock:
+            return self.stream_fps
 
 
 def detect_loop(detector, cfg, latest, shared, stop):
@@ -1852,6 +1861,8 @@ def reader_loop(cfg, latest):
     prev_gray = None
     last_fresh = time.time()
     last_pos = -1.0
+    rate_t = time.time()
+    rate_n = 0
 
     while cfg.running:
         _beat("reader")
@@ -1948,6 +1959,14 @@ def reader_loop(cfg, latest):
             if fresh or pos > last_pos + 1.0:
                 last_fresh = time.time()
             last_pos = pos if pos > last_pos else last_pos
+            # Report the true stream rate (frames actually delivered), not the
+            # fresh-frame rate: the NVR repeats frames on a static scene, and
+            # those are skipped downstream, which made the header fps look broken.
+            rate_n += 1
+            now_r = time.time()
+            if now_r - rate_t >= 2.0:
+                latest.set_stream_fps(rate_n / (now_r - rate_t))
+                rate_t, rate_n = now_r, 0
             latest.put(frame.copy(), fresh)
         except Exception as e:
             print(f"[reader] error: {e}; reconnecting...", flush=True)
@@ -2675,6 +2694,7 @@ def main():
                 payload = {
                     "track_fps": round(float(track_fps), 1),
                     "detect_fps": round(float(detect_fps), 1),
+                    "stream_fps": round(float(latest.get_stream_fps()), 1),
                     "tracks": int(len(objects)),
                     "detector": type(detector).__name__,
                     "tracker": type(tracker).__name__,

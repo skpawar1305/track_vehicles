@@ -17,7 +17,10 @@
   let clockLbl = $derived.by(() => { now; return clockText(); });
   let edgeFps = $derived.by(() => {
     if (!$edge.stats || ($edge.age != null && $edge.age >= 30)) return null;
-    return $edge.stats.detect_fps != null ? Math.round(Number($edge.stats.detect_fps)) : "?";
+    // Prefer the true stream rate: the detect rate dips when the NVR repeats
+    // frames on a static scene, which made the header look broken when idle.
+    const v = $edge.stats.stream_fps ?? $edge.stats.detect_fps;
+    return v != null ? Math.round(Number(v)) : "?";
   });
   let edgeTemp = $derived.by(() => {
     if (!$edge.stats || ($edge.age != null && $edge.age >= 30)) return null;

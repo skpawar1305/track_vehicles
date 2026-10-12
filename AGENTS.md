@@ -244,14 +244,20 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   `/api/config`); the toggle is optimistic (in-place, no gallery rebuild, no scroll jump).
   `/calendar` 302-redirects to `/timeline`.
 - **The substream is a genuine ~25 fps — verify it, don't assume.** Measured on the
-  current camera: `CAP_PROP_FPS` 25, PTS delta 40 ms/frame, ~25–29 frames/s delivered,
-  and **0% bit-identical consecutive frames** over 10 s. So the tracker advances on
-  essentially every frame; a "track fps" around 25 is correct and expected. An earlier
+  current camera (direct PT-NC120D3): `CAP_PROP_FPS` 25, PTS delta 40 ms/frame, ~25–29
+  frames/s delivered, and **0% bit-identical consecutive frames** over 10 s. An earlier
   note here claimed ~9 genuinely-new fps on a bursty NVR — that was wrong (it inferred
   duplicates from pixel changes on an idle scene, which says nothing about the encoder).
-  To tell a *duplicated* frame from a *static* one, use the container timestamp
-  (`CAP_PROP_POS_MSEC`), not pixel diffs; the reader's `fresh` flag is for the stall case
-  below, not normal operation.
+  **But the production source is now the Prama NVR** (`…/Streaming/Channels/202`), whose
+  substream *does* repeat frames on a static scene: measured **26.7 fps delivered but
+  ~48% of consecutive frames bit-identical** (only ~45% register as `fresh`). The reader
+  flags those `fresh=False` and detect/track skip them, so `track_fps`/`detect_fps` dip
+  to a few fps on a quiet scene and jump back to ~20 when a vehicle moves — that is
+  expected, not a fault. To tell a *duplicated* frame from a *static* one, the container
+  timestamp (`CAP_PROP_POS_MSEC`) is the right signal; the reader's `fresh` flag (pixel
+  diff) conflates the stall case with a static scene. The dashboard header therefore
+  shows `stream_fps` (the reader's true delivered rate), not `detect_fps`, so it does not
+  look broken when idle.
 - **Two-tier association: IoU primary, centroid-distance fallback.** Frame-to-frame at
   ~25 fps a plain IoU tracker works, so tier 1 matches by IoU against the track's last box
   *translated by px/second velocity over the elapsed time* (`_pred_box`) — the raw last box
