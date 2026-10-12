@@ -2,16 +2,17 @@
 
 RTSP vehicle counting with line-crossing detection. Inference is **ncnn**
 (ARM-optimised): production runs **PP-PicoDet-S @320**, code default **YOLO26n INT8**
-(`hybrid`); tracking is a **two-tier velocity tracker** (IoU primary,
-centroid-distance fallback), the edge store is **offline-first SQLite**, and the dashboard
-is **Bun + Drizzle + SQLite** on a VPS.
+(`hybrid`); tracking is either the in-house **two-tier velocity tracker** (IoU primary,
+centroid-distance fallback, default) or a vendored **ByteTrack** (Kalman + two-stage
+IoU); the edge store is **offline-first SQLite**, and the dashboard is
+**Bun + Drizzle + SQLite** on a VPS.
 
 ```
 ┌──────────────── Pi 5 (DietPi, behind NAT) ─────────────────────────┐
 │ CCTV substream 640x360 H.264 (RtspRelay: SHA-256 Digest)           │
 │   reader thread ─▶ newest frame                                    │
-│   detect thread ─▶ NanoDet-Plus fp32 / YOLO26n INT8 (ncnn)        │
-│   tracking loop ─▶ IoU tracker @ camera rate + crossing gate       │
+│   detect thread ─▶ PP-PicoDet-S @320 (ncnn)                        │
+│   tracking loop ─▶ tracker (centroid / ByteTrack) + crossing gate  │
 │   captures → JPEG + SQLite (offline) ; sync worker → HTTPS POST   │
 │   terminal agent ─▶ outbound WSS → dashboard /terminal (PTY shell)│
 └────────────────────────────────────────────────────────────────────┘
@@ -65,6 +66,22 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
   `TRACKER_ASSOC_MAX_FRAC`), so a track re-acquires a vehicle that moved far during a
   multi-second stall even if the predicted box missed. IoU always wins over the fallback.
   No appearance model; suits sparse traffic, not dense crowds.
+- **Tracker backend.** `TRACKER_TRACKER` (or `"tracker"` in `config.json`) selects the
+  association engine: `centroid` (default, the two-tier tracker above) or `bytetrack`.
+  The ByteTrack path wraps a **vendored copy** of the `bytetracker` package in
+  `bytetracker/` — Kalman filter + two-stage IoU (high-score, then low-score recovery).
+  It was patched to drop its `torch` import and replace the `lap` C-extension with
+  `scipy.optimize.linear_sum_assignment` (scipy is already a dependency), so the Pi
+  needs no extra install. The adapter coasts ByteTrack's lost tracks (Kalman-predicted,
+  `prev_centroid=None`) so the live overlay and gate bookkeeping don't flicker between
+  detector updates.
+- **Detector settings come from the PicoDet repo.** mean `[103.53,116.28,123.675]`,
+  norm `1/[57.375,57.12,58.395]`, `reg_max=7`, `fp16` arithmetic, and **per-class NMS at
+  IoU 0.3** with the repo's `+1`-pixel area convention (`TRACKER_DNN_IOU`). We keep our
+  class-agnostic merge (at `TRACKER_DUP_IOU`, 0.6) as a second pass so one vehicle's
+  car+truck box pair still collapses the way `agnostic_nms` would. Score threshold
+  defaults to `0.3` (`TRACKER_DNN_CONF`) rather than the repo's `0.5`: on 97 real
+  crossing frames 0.5 lost 4/97 frames and a truck box, while 0.3 lost none.
 - **Crossing test (hysteresis + confirmed transit + re-arm).** Three rules, in `CrossingGate`:
   * *Hysteresis.* Each track commits to a side of the line; a flip is only a *candidate*
     when the centroid emerges ≥ `TRACKER_CROSS_MARGIN_FRAC` of the frame height past the
@@ -91,7 +108,8 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 
 | Path | Purpose |
 |------|---------|
-| `run.py` | Headless edge loop: ncnn detector + IoU tracker + crossing + capture + SQLite |
+| `run.py` | Headless edge loop: ncnn detector + centroid/ByteTrack tracker + crossing + capture + SQLite |
+| `bytetracker/` | Vendored ByteTrack (Kalman + two-stage IoU); `torch`/`lap` removed so it runs on the Pi |
 | `rtsp_relay.py` | SHA-256 RTSP Digest → local RTP/SDP shim for cameras FFmpeg can't authenticate |
 | `store.py` | Offline-first SQLite event store (+ retention prune) |
 | `sync.py` | HTTP upload worker (retries; deletes after ACK) |
@@ -101,7 +119,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/quantize_int8.py` | INT8-quantize an ncnn model (`ncnn2table`/`ncnn2int8`) |
 | `tools/live_push.py` | Dev harness that mimics `run.py` from a laptop (can push to the VPS) |
 | `tools/test_clip.py` | Run the production tracker/crossing over a video clip and report IN/OUT |
-| `tools/test_crossing.py` | Synthetic crossing-gate regression + annotated re-arm demo video |
+| `tools/test_crossing.py` | Synthetic crossing-gate regression (incl. a centroid-vs-bottom-edge probe comparison) + annotated re-arm demo video |
 | `tools/set_camera_time.py` | Read/set a camera clock over ONVIF (Manual or NTP) |
 | `tools/onvif_media.py` | Inspect a camera's ONVIF encoder configs / profiles / RTSP URIs (diagnose a blurry substream) |
 | `tools/set_encoder.py` | Read/set a camera's ONVIF encoder (resolution/bitrate/GOP/fps/quality); dry-run by default |
@@ -154,7 +172,11 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_MODEL_IMGSZ` | `320x320` | Model input `HxW`, matched to the ROI aspect — also `"model_imgsz"` in `config.json` |
 | `TRACKER_INT8` | `1` | Use `model_int8.ncnn.param` — also `"int8"` in `config.json` |
 | `TRACKER_DETECTOR` | `hybrid` | `hybrid` (motion-gated YOLO) · `motion` · `yolo` · `nanodet` (ncnn) · `picodet` (ncnn) · `opencv` (`cv2.dnn` ONNX) — also `"detector"` in `config.json` |
-| `TRACKER_DNN_MODEL` | – | Model path for the `nanodet`/`opencv` detectors — also `"dnn_model"` in `config.json` |
+| `TRACKER_DNN_MODEL` | – | Model path for the `nanodet`/`picodet`/`opencv` detectors — also `"dnn_model"` in `config.json` |
+| `TRACKER_DNN_IMGSZ` | `416` | Square input of the `nanodet`/`picodet` ncnn graph — also `"dnn_imgsz"` in `config.json` |
+| `TRACKER_DNN_CONF` | `0.3` | `picodet` score threshold (repo default is 0.5; 0.3 keeps more frames) — also `"dnn_conf"` in `config.json` |
+| `TRACKER_DNN_IOU` | `0.3` | `picodet` per-class NMS IoU (the PicoDet repo's value) — also `"dnn_iou"` in `config.json` |
+| `TRACKER_TRACKER` | `centroid` | Tracker backend: `centroid` (two-tier IoU+distance) or `bytetrack` (Kalman + two-stage IoU) — also `"tracker"` in `config.json` |
 | `TRACKER_THREADS` | `4` | ncnn inference threads (also settable as `"threads"` in `config.json`) |
 | `TRACKER_MOTION_HOLD` | `60` | Seconds motion keeps detection armed |
 | `TRACKER_MOTION_HEARTBEAT` | `3` | Idle YOLO cadence (s) |

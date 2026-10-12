@@ -237,7 +237,18 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   (`TRACKER_ASSOC_FRAC` + `TRACKER_ASSOC_GAP_FRAC`, capped by `TRACKER_ASSOC_MAX_FRAC`): a
   tracked vehicle whose box changed shape/speed so IoU misses is still re-acquired by
   proximity. Sort key is `(tier, cost)`, so every IoU match beats any fallback and the best
-  per-tier match is chosen (greedy; `bytetracker` is not used — only the dev harnesses).
+  per-tier match is chosen (greedy).
+- **ByteTrack is an optional backend, vendored and patched.** `"tracker": "bytetrack"` in
+  `config.json` (`TRACKER_TRACKER`) swaps `CentroidTracker` for `ByteTrackAdapter`, wrapping a
+  `bytetracker/` package vendored into the repo (Kalman + two-stage IoU). It was patched to
+  drop its `torch` import (the `xywh2xyxy`/`xyxy2xywh` isinstance checks) and replace the
+  `lap` C-extension with `scipy.optimize.linear_sum_assignment` (scipy is already a dep), so
+  the Pi needs no install — the upstream wheel otherwise pulls torch. ByteTrack only *outputs*
+  live tracks, so the adapter also emits its `lost_stracks` as Kalman predictions with
+  `prev_centroid=None` (display only, never a crossing — run.py skips `prev_centroid is None`)
+  to stop the live overlay blinking between detector updates. ByteTrack ids are global and
+  never reused, but the adapter still prunes per-id `prev`/`age` for ids ByteTrack retired, or
+  it leaks for months. `bytetracker` in the dev harnesses is the laptop-only upstream.
 - **The crossing gate is three rules: hysteresis + confirmed transit + re-arm.** Earlier
   versions stacked min-age + min-travel-from-birth + cooldown + a 15-frame refractory + this
   same re-arm; the extra gates were either redundant or wrong (net-travel from *birth* never
@@ -258,6 +269,16 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   `min_age` is the only other gate (the run.py pre-filter and inside `update()`); it is not a
   travel/cooldown heuristic. `tools/test_crossing.py` asserts wobble=1, passthru=1,
   true-return=2, nudge=1, rapid-reversal=0, and a queued pair=2; don't regress.
+- **The crossing probe is the centroid; the box's bottom edge is a trade, not a win.**
+  `tools/test_crossing.py` also runs every case through the centroid (production) and the
+  box's bottom/ground edge (Qengineering's "tail"). They agree on all genuine cases (a pure
+  translation only shifts the effective line), but the bottom edge is a **2:1 sensitivity
+  trade**: the centroid is the box midpoint, so it moves *half* as far when the *top* edge
+  flaps (the excavator arm / phantom-container refit) — hence the centroid false-counts where
+  the bottom edge does not — and *half* as far when the *bottom* edge flaps (a shadow/reflection
+  or a detector contracting the lower edge) — hence the bottom edge false-counts where the
+  centroid does not. The arm case is already neutralised by the keep-out + confirm distance, so
+  switching to the bottom edge would only add the shadow failure mode: keep the centroid.
 - **Don't confuse the re-arm distance with the margin.** `0.15` was too small on this site: a
   slow dumper that overshot the line by ~55px re-armed and re-counted (`id6 out/in`, 12:54).
   `0.2` (72px on 360p) covers that swing without missing real returns.
@@ -335,7 +356,12 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   (4×(reg_max+1)=32) via softmax-expectation over the bins. Preprocess is a **plain stretch**
   to 320² (`ncnn.Mat.from_pixels_resize`, BGR, mean [103.53,116.28,123.675], norm
   1/[57.375,57.12,58.395]); the ROI slice must be `np.ascontiguousarray`'d or
-  `from_pixels_resize` reads garbage. Class-agnostic NMS (`nms_thresh` 0.6). Measured ~21
+  `from_pixels_resize` reads garbage. Post-processing follows the PicoDet repo:
+  **per-class NMS at IoU 0.3** (`TRACKER_DNN_IOU`, the `+1`-px area convention) and
+  `fp16` arithmetic, then our class-agnostic merge at `TRACKER_DUP_IOU` (0.6) as a
+  second pass so a vehicle's car+truck pair still collapses. Score threshold is
+  `TRACKER_DNN_CONF`, default **0.3** not the repo's 0.5 — 0.5 lost 4/97 frames and a
+  truck box in the A/B. Measured ~21
   `detect_fps` at ~71 °C on the Pi 5 (NanoDet-Plus-m@416 was ~20 fps / 76 °C at equal
   recall). A/B over 97 real crossing frames (2026-10-12): PicoDet-S@320 **97/97** (93 truck)
   ≈ NanoDet-Plus-m@416 97/97 (94) and ≫ YOLO26n INT8@320 74/97 (73); on the saved truck

@@ -215,6 +215,18 @@ class Config:
         # Square input of the `nanodet`/`picodet` ncnn graph (must match its
         # export). Independent of the YOLO model_imgsz above.
         self.dnn_imgsz = os.environ.get("TRACKER_DNN_IMGSZ", "416")
+        # Tracker backend: "centroid" (the in-house IoU+distance tracker) or
+        # "bytetrack" (Kalman + two-stage IoU). Overridable from config.json so
+        # it can be A/B'd on the edge without editing the root-owned tracker.env.
+        self.tracker = os.environ.get("TRACKER_TRACKER", "centroid")
+        # PicoDet/NanoDet ncnn detection settings. NMS follows the PicoDet repo
+        # (per-class, IoU 0.3, mean/norm already matched). Score defaults to 0.3,
+        # not the repo's 0.5: on 97 real crossing frames 0.5 lost 4/97 frames and
+        # a truck box, while 0.3 kept 97/97 (a crossing spans ~50 frames, but the
+        # low-confidence frames matter near the line). Set dnn_iou/dnn_conf from
+        # config.json to A/B on the edge.
+        self.dnn_conf = float(os.environ.get("TRACKER_DNN_CONF", "0.3"))
+        self.dnn_iou  = float(os.environ.get("TRACKER_DNN_IOU", "0.3"))
         # Debug overlay (hysteresis band + per-track re-arm state) on the live feed.
         self.debug_overlay = os.environ.get("TRACKER_DEBUG_OVERLAY", "0") == "1"
         self.running = True
@@ -282,6 +294,9 @@ class Config:
                 self.dnn_imgsz = data.get("dnn_imgsz", self.dnn_imgsz)
                 self.detector = data.get("detector", self.detector)
                 self.dnn_model = data.get("dnn_model", self.dnn_model)
+                self.tracker = data.get("tracker", self.tracker)
+                self.dnn_conf = float(data.get("dnn_conf", self.dnn_conf))
+                self.dnn_iou  = float(data.get("dnn_iou", self.dnn_iou))
                 self.cam2_url = data.get("cam2_url", self.cam2_url)
                 self.capture_url = data.get("capture_url", self.capture_url)
             self._derive_capture()
@@ -322,6 +337,9 @@ class Config:
                     "dnn_imgsz": self.dnn_imgsz,
                     "detector": self.detector,
                     "dnn_model": self.dnn_model,
+                    "tracker": self.tracker,
+                    "dnn_conf": self.dnn_conf,
+                    "dnn_iou": self.dnn_iou,
                     "cam2_url": self.cam2_url, "capture_url": self.capture_url}
         with open(CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
@@ -832,43 +850,68 @@ _PICO_HEADS = [(0, 1, 8), (2, 3, 16), (4, 5, 32), (6, 7, 64)]
 
 
 class PicodetNcnn:
-    def __init__(self, model_param, model_bin=None, conf_thresh=0.3,
-                 nms_thresh=0.6, num_threads=NUM_THREADS, input_size=320,
+    def __init__(self, model_param, model_bin=None, conf_thresh=0.5,
+                 nms_thresh=0.3, dup_iou=None, nms_agnostic=True,
+                 num_threads=NUM_THREADS, input_size=320,
                  reg_max=7, num_class=80):
         if model_bin is None:
             model_bin = model_param[:-6] + ".bin"
         self.conf_thresh = float(conf_thresh)
         self.nms_thresh  = float(nms_thresh)
+        # Second, class-agnostic pass: collapse one vehicle's two class-boxes
+        # (car+truck) the way Ultralytics' agnostic_nms does. The PicoDet repo
+        # does per-class NMS only, so this is our addition to protect the count.
+        self.nms_agnostic = bool(nms_agnostic)
+        self.dup_iou = DUP_IOU if dup_iou is None else float(dup_iou)
         self.input_size  = int(input_size)
         self.reg_max     = int(reg_max)
         self.num_class   = int(num_class)
         self.net = ncnn.Net()
         self.net.opt.num_threads = num_threads
+        self.net.opt.use_fp16_arithmetic = True   # PicoDet repo: fp16 arithmetic
         self.net.load_param(model_param)
         self.net.load_model(model_bin)
         self.bins = np.arange(self.reg_max + 1, dtype=np.float32)
 
-    def _nms(self, boxes, scores):
-        # Class-agnostic NMS (boxes are indexed by anchor; labels are separate),
-        # so one vehicle's car+truck duplicates collapse like NanoDet's.
+    def _nms(self, boxes, scores, labels):
+        """Per-class NMS at ``nms_thresh`` — the PicoDet repo calls nms() once
+        per class (threshold 0.3) and keeps the +1-pixel area convention."""
         if not boxes:
             return []
         b = np.asarray(boxes, dtype=np.float32)
         sc = np.asarray(scores, dtype=np.float32)
-        area = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
-        order = sc.argsort()[::-1]
+        lb = np.asarray(labels)
         keep = []
-        while order.size:
-            i = order[0]
-            keep.append(int(i))
-            xx1 = np.maximum(b[i, 0], b[order[1:], 0])
-            yy1 = np.maximum(b[i, 1], b[order[1:], 1])
-            xx2 = np.minimum(b[i, 2], b[order[1:], 2])
-            yy2 = np.minimum(b[i, 3], b[order[1:], 3])
-            inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
-            iou = inter / (area[i] + area[order[1:]] - inter + 1e-9)
-            order = order[np.where(iou <= self.nms_thresh)[0] + 1]
+        for c in np.unique(lb):
+            sub = np.nonzero(lb == c)[0]
+            bb, ss = b[sub], sc[sub]
+            x1, y1, x2, y2 = bb[:, 0], bb[:, 1], bb[:, 2], bb[:, 3]
+            area = (x2 - x1 + 1) * (y2 - y1 + 1)
+            order = ss.argsort()[::-1]
+            while order.size:
+                i = order[0]
+                keep.append(int(sub[i]))
+                xx1 = np.maximum(x1[i], x1[order[1:]])
+                yy1 = np.maximum(y1[i], y1[order[1:]])
+                xx2 = np.minimum(x2[i], x2[order[1:]])
+                yy2 = np.minimum(y2[i], y2[order[1:]])
+                w = np.maximum(0, xx2 - xx1 + 1)
+                h = np.maximum(0, yy2 - yy1 + 1)
+                inter = w * h
+                iou = inter / (area[i] + area[order[1:]] - inter + 1e-9)
+                order = order[np.where(iou <= self.nms_thresh)[0] + 1]
         return keep
+
+    def _merge_cross_class(self, boxes, scores, keep):
+        """Class-agnostic pass: drop kept boxes overlapping (> dup_iou) a higher
+        score box of any class, so one vehicle's car+truck pair collapses."""
+        if not self.nms_agnostic or self.dup_iou <= 0 or len(keep) < 2:
+            return keep
+        out = []
+        for k in sorted(keep, key=lambda k: float(scores[k]), reverse=True):
+            if all(box_iou(boxes[k], boxes[j]) <= self.dup_iou for j in out):
+                out.append(k)
+        return out
 
     def _run(self, frame, enabled_classes, ox, oy):
         h, w = frame.shape[:2]
@@ -915,7 +958,9 @@ class PicodetNcnn:
                 scores.append(float(sc[k]))
                 labels.append(cid)
         out = []
-        for k in self._nms(boxes, scores):
+        keep = self._nms(boxes, scores, labels)
+        keep = self._merge_cross_class(boxes, scores, keep)
+        for k in keep:
             bx1, by1, bx2, by2 = (int(boxes[k][0]), int(boxes[k][1]),
                                   int(boxes[k][2]), int(boxes[k][3]))
             cid = labels[k]
@@ -1581,7 +1626,76 @@ class CentroidTracker:
             del self.tracks[tid]
         return objects
 
-# ── Annotation ────────────────────────────────────────────────────────
+# ── ByteTrack adapter ────────────────────────────────────────────────
+class ByteTrackAdapter:
+    """Expose the vendored ByteTrack (Kalman + two-stage IoU) behind the same
+    ``update(dets, w, h, now=) -> list[TrackInfo]`` interface as CentroidTracker.
+
+    Selected with ``"tracker": "bytetrack"`` in config.json. dets is the same
+    list of dicts the detectors emit; we hand ByteTrack an ``(N, 6)`` array of
+    ``[x1, y1, x2, y2, score, class_id]``. ByteTrack only *outputs* live tracks,
+    so we also coast its ``lost_stracks`` (Kalman-predicted, prev_centroid=None)
+    to keep the live overlay and the gate bookkeeping from flickering while the
+    detector catches up.
+    """
+
+    def __init__(self, track_thresh=0.3, track_buffer=40, match_thresh=0.8,
+                 frame_rate=30, debug=False):
+        from bytetracker import BYTETracker
+        self.bt = BYTETracker(track_thresh=track_thresh, track_buffer=track_buffer,
+                              match_thresh=match_thresh, frame_rate=frame_rate)
+        self.prev = {}   # tid -> last centroid handed to the gate
+        self.age = {}    # tid -> frames seen
+        self.debug = debug
+
+    def _info(self, tid, bbox, cls_id, score, cen, prev, age):
+        label = _VEHICLE_NAMES.get(cls_id, f"cls_{cls_id}")
+        return TrackInfo(tid, bbox, label, cls_id, float(score), cen, prev, age)
+
+    def update(self, dets, w, h, now=None):
+        if dets:
+            arr = np.array([[float(d['bbox'][0]), float(d['bbox'][1]),
+                             float(d['bbox'][2]), float(d['bbox'][3]),
+                             float(d['confidence']), float(d['class_id'])]
+                            for d in dets], dtype=np.float32)
+        else:
+            arr = np.empty((0, 6), dtype=np.float32)
+        out = self.bt.update(arr, None)
+
+        objects, seen = [], set()
+        for row in out:
+            x1, y1, x2, y2, tid, cls_id, score = row
+            tid, cls_id = int(tid), int(cls_id)
+            bbox = (float(x1), float(y1), float(x2), float(y2))
+            cen = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+            prev = self.prev.get(tid)
+            self.prev[tid] = cen
+            self.age[tid] = self.age.get(tid, 0) + 1
+            objects.append(self._info(tid, bbox, cls_id, score, cen, prev, self.age[tid]))
+            seen.add(tid)
+
+        # Coast lost tracks (Kalman prediction) so the overlay does not blink.
+        for st in self.bt.lost_stracks:
+            tid = st.track_id
+            if tid in seen:
+                continue
+            x1, y1, x2, y2 = (float(v) for v in st.tlbr)
+            bbox = (x1, y1, x2, y2)
+            cen = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+            self.age[tid] = self.age.get(tid, 0) + 1
+            objects.append(self._info(tid, bbox, int(st.cls), st.score, cen, None,
+                                      self.age[tid]))
+
+        # Track ids are never reused: drop per-id memory ByteTrack has retired,
+        # or it leaks for the life of the process.
+        live = ({t.track_id for t in self.bt.tracked_stracks}
+                | {t.track_id for t in self.bt.lost_stracks})
+        for tid in [t for t in self.prev if t not in live]:
+            self.prev.pop(tid, None)
+            self.age.pop(tid, None)
+        return objects
+
+
 def annotate_frame(frame, line, roi, objects, counts, fps, det_count, flip_sides=False, simple=False):
     h, w = frame.shape[:2]
     if not simple:
@@ -2221,9 +2335,11 @@ def main():
         print(f"[main] NanoDet-Plus ncnn ({cfg.dnn_model}, {cfg.dnn_imgsz}, {cfg.threads} threads)")
     elif cfg.detector == "picodet":
         detector    = PicodetNcnn(model_param=cfg.dnn_model,
-                                   conf_thresh=cfg.conf_thresh, num_threads=cfg.threads,
+                                   conf_thresh=cfg.dnn_conf, nms_thresh=cfg.dnn_iou,
+                                   num_threads=cfg.threads,
                                    input_size=_parse_imgsz(cfg.dnn_imgsz)[0])
-        print(f"[main] PP-PicoDet ncnn ({cfg.dnn_model}, {cfg.dnn_imgsz}, {cfg.threads} threads)")
+        print(f"[main] PP-PicoDet ncnn ({cfg.dnn_model}, {cfg.dnn_imgsz}, "
+              f"score={cfg.dnn_conf}, nms_iou={cfg.dnn_iou}, {cfg.threads} threads)")
     else:
         detector    = HybridDetector(conf_thresh=cfg.conf_thresh,
                                      motion_scale=cfg.motion_scale,
@@ -2238,15 +2354,25 @@ def main():
     # IoU association against each track's velocity-predicted box: frame-to-frame
     # at ~25 fps this is a standard IoU tracker; across a stream stall the box is
     # extrapolated forward so a constant-velocity detection still overlaps.
-    tracker     = CentroidTracker(
-        max_age=int(os.environ.get("TRACKER_TRACK_MAX_AGE", "40")),
-        iou_gate=float(os.environ.get("TRACKER_IOU_GATE", "0.2")),
-        assoc_frac=float(os.environ.get("TRACKER_ASSOC_FRAC", "0.2")),
-        gap_frac=float(os.environ.get("TRACKER_ASSOC_GAP_FRAC", "0.5")),
-        gap_max_frac=float(os.environ.get("TRACKER_ASSOC_MAX_FRAC", "1.0")),
-        vel_reset=float(os.environ.get("TRACKER_VEL_RESET", "0.4")),
-        pred_cap=float(os.environ.get("TRACKER_ASSOC_PRED_CAP", "0.5")),
-        debug=os.environ.get("TRACKER_DEBUG") == "1")
+    if cfg.tracker == "bytetrack":
+        tracker = ByteTrackAdapter(
+            track_thresh=float(os.environ.get("TRACKER_BT_TRACK_THRESH", "0.3")),
+            track_buffer=int(os.environ.get("TRACKER_TRACK_MAX_AGE", "40")),
+            match_thresh=float(os.environ.get("TRACKER_BT_MATCH_THRESH", "0.8")),
+            frame_rate=30,
+            debug=os.environ.get("TRACKER_DEBUG") == "1")
+        print("[main] Tracker: ByteTrack (Kalman + two-stage IoU)")
+    else:
+        tracker = CentroidTracker(
+            max_age=int(os.environ.get("TRACKER_TRACK_MAX_AGE", "40")),
+            iou_gate=float(os.environ.get("TRACKER_IOU_GATE", "0.2")),
+            assoc_frac=float(os.environ.get("TRACKER_ASSOC_FRAC", "0.2")),
+            gap_frac=float(os.environ.get("TRACKER_ASSOC_GAP_FRAC", "0.5")),
+            gap_max_frac=float(os.environ.get("TRACKER_ASSOC_MAX_FRAC", "1.0")),
+            vel_reset=float(os.environ.get("TRACKER_VEL_RESET", "0.4")),
+            pred_cap=float(os.environ.get("TRACKER_ASSOC_PRED_CAP", "0.5")),
+            debug=os.environ.get("TRACKER_DEBUG") == "1")
+        print("[main] Tracker: CentroidTracker (IoU + distance fallback)")
     capture_mgr = CaptureManager(cfg.capture_dir, cfg.max_captures)
 
     # Offline-first event store (SQLite); survives restarts and outages
@@ -2440,6 +2566,7 @@ def main():
                     "detect_fps": round(float(detect_fps), 1),
                     "tracks": int(len(objects)),
                     "detector": type(detector).__name__,
+                    "tracker": type(tracker).__name__,
                     "dets": int(len(shared.get("dets") or [])),
                     "temp_c": None if temp_c != temp_c else round(float(temp_c), 1),
                     "in": int(c_in), "out": int(c_out),
