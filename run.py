@@ -2251,7 +2251,7 @@ def main():
                                         roi=(roi_px if cfg.debug_overlay else None), flip=cfg.flip_sides,
                                         gate=(cross_gate if cfg.debug_overlay else None),
                                         margin_px=cfg.cross_margin_frac * h,
-                                        keepout=(cross_gate.keepout if cfg.debug_overlay else None))
+                                        keepout=cross_gate.keepout)
                     ok, jpeg = cv2.imencode('.jpg', ann, [cv2.IMWRITE_JPEG_QUALITY, LIVE_QUALITY])
                     if ok:
                         try: live_q.put_nowait(jpeg.tobytes())
