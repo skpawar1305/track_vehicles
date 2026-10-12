@@ -2056,8 +2056,12 @@ def annotate_live(frame, line, objects, counts, target_h=LIVE_HEIGHT, roi=None, 
         pts = np.array([[int(p[0] * s), int(p[1] * s)] for p in keepout], dtype=np.int32)
         cv2.polylines(img, [pts.reshape((-1, 1, 2))], True, (60, 60, 220), 1, cv2.LINE_AA)
     if roi is not None and len(roi) >= 3:
+        # Very faint so it reads as a hint, not part of the scene: draw on a copy
+        # and alpha-blend back (OpenCV polylines has no alpha).
         pts = np.array([[int(p[0] * s), int(p[1] * s)] for p in roi], dtype=np.int32)
-        cv2.polylines(img, [pts.reshape((-1, 1, 2))], True, (100, 180, 255), 1, cv2.LINE_AA)
+        overlay = img.copy()
+        cv2.polylines(overlay, [pts.reshape((-1, 1, 2))], True, (100, 180, 255), 1, cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.22, img, 0.78, 0, img)
     if line:
         x1, y1, x2, y2 = (int(v * s) for v in line)
         cv2.line(img, (x1, y1), (x2, y2), (59, 130, 246), 2)
@@ -2645,7 +2649,7 @@ def main():
                 last_live = now_t
                 try:
                     ann = annotate_live(frame, line_px, objects, {"in": c_in, "out": c_out},
-                                        roi=(roi_px if cfg.debug_overlay else None), flip=cfg.flip_sides,
+                                        roi=roi_px, flip=cfg.flip_sides,
                                         gate=(cross_gate if cfg.debug_overlay else None),
                                         margin_px=cfg.cross_margin_frac * h,
                                         keepout=cross_gate.keepout)
