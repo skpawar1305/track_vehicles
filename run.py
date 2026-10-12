@@ -169,7 +169,10 @@ class Config:
         self.capture_dir = "captures"
         self.max_captures = 1000
         self.enabled_classes = DEFAULT_ENABLED_CLASSES.copy()
-        self.detector = os.environ.get("TRACKER_DETECTOR", "hybrid")  # "hybrid" | "motion" | "yolo"
+        self.detector = os.environ.get("TRACKER_DETECTOR", "hybrid")  # "hybrid" | "motion" | "yolo" | "opencv"
+        # OpenCV DNN (cv2.dnn) ONNX path, used when detector == "opencv".
+        self.dnn_model = os.environ.get(
+            "TRACKER_DNN_MODEL", "/opt/tracker/models/object_detection_nanodet_2022nov.onnx")
         self.motion_scale = float(os.environ.get("TRACKER_MOTION_SCALE", "0.5"))
         self.motion_min_area = int(os.environ.get("TRACKER_MOTION_MIN_AREA", "12"))
         self.motion_hold = float(os.environ.get("TRACKER_MOTION_HOLD", "60"))
@@ -252,6 +255,8 @@ class Config:
                 self.model = data.get("model", self.model)
                 self.model_imgsz = data.get("model_imgsz", self.model_imgsz)
                 self.int8 = bool(data.get("int8", self.int8))
+                self.detector = data.get("detector", self.detector)
+                self.dnn_model = data.get("dnn_model", self.dnn_model)
                 self.cam2_url = data.get("cam2_url", self.cam2_url)
                 self.capture_url = data.get("capture_url", self.capture_url)
             self._derive_capture()
@@ -287,6 +292,8 @@ class Config:
                     "model": self.model,
                     "model_imgsz": self.model_imgsz,
                     "int8": self.int8,
+                    "detector": self.detector,
+                    "dnn_model": self.dnn_model,
                     "cam2_url": self.cam2_url, "capture_url": self.capture_url}
         with open(CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
@@ -532,6 +539,10 @@ class NanoDetNcnn:
                  iou_thresh=0.45, num_threads=NUM_THREADS):
         self.conf_thresh = conf_thresh
         self.iou_thresh  = iou_thresh
+        # Containment suppression: drop a box that mostly sits inside a
+        # higher-confidence one (NanoDet emits "container"/fragment boxes that
+        # IoU-NMS misses because their IoU is low).
+        self.contain_iou = 0.6
         if model_bin is None:
             model_bin = model_param[:-6] + ".bin"
         self.model_param = model_param
@@ -632,6 +643,23 @@ class NanoDetNcnn:
 
         boxes = np.stack([x1, y1, x2, y2], axis=1)
         keep = self._nms(boxes, scores)
+        # Drop containers: a lower-confidence box mostly inside a kept box.
+        order = np.array(keep)[np.argsort(-scores[keep])]
+        keep2 = []
+        for i in order:
+            ai = (boxes[i, 2] - boxes[i, 0]) * (boxes[i, 3] - boxes[i, 1])
+            redundant = False
+            for j in keep2:
+                aj = (boxes[j, 2] - boxes[j, 0]) * (boxes[j, 3] - boxes[j, 1])
+                iw = max(0.0, min(boxes[i, 2], boxes[j, 2]) - max(boxes[i, 0], boxes[j, 0]))
+                ih = max(0.0, min(boxes[i, 3], boxes[j, 3]) - max(boxes[i, 1], boxes[j, 1]))
+                small = min(ai, aj)
+                if small > 0 and (iw * ih) / small > self.contain_iou:
+                    redundant = True
+                    break
+            if not redundant:
+                keep2.append(i)
+        keep = keep2
         out_list = []
         for k in keep:
             bx1, by1, bx2, by2 = int(boxes[k, 0]), int(boxes[k, 1]), int(boxes[k, 2]), int(boxes[k, 3])
@@ -654,6 +682,152 @@ class NanoDetNcnn:
         pts = np.array(roi_points, dtype=np.int32)
         # int(): numpy min()/max() leak np.int32 offsets into every bbox, which
         # later blows up json.dumps() when the crossing is persisted.
+        cx1, cy1 = int(max(0, pts[:, 0].min())), int(max(0, pts[:, 1].min()))
+        cx2, cy2 = int(min(w, pts[:, 0].max())), int(min(h, pts[:, 1].max()))
+        if cx2 <= cx1 or cy2 <= cy1: return []
+        return self._run_on_roi(frame[cy1:cy2, cx1:cx2], enabled_classes, cx1, cy1)
+
+
+class CvDnnNanoDet:
+    """NanoDet-Plus (OpenCV Zoo) via cv2.dnn on the ONNX graph.
+
+    Selected with ``"detector": "opencv"`` in config.json. It is a CPU-only
+    OpenCV-5 DNN path: measured ~12 fps at 416 on the Pi 5, i.e. slower than the
+    ncnn YOLO path — kept as an opt-in alternative, not the default.
+
+    The ONNX is a 3-level NanoDet (strides 8/16/32) whose six outputs are grouped
+    ``[cls8, cls16, cls32, bbox8, bbox16, bbox32]`` (each cls is (A, nc), each
+    bbox is (A, 4*(reg_max+1))). We pair cls/bbox by their anchor count, so the
+    decoder is not tied to a particular level count or output order. Input is
+    stretched to 416x416 (no letterbox), matching the OpenCV Zoo demo.
+    """
+
+    def __init__(self, model_path, conf_thresh=0.3, iou_thresh=0.6,
+                 num_threads=NUM_THREADS):
+        self.conf_thresh = conf_thresh
+        self.iou_thresh = iou_thresh
+        # Containment (intersection-over-min-area) suppression threshold: a box
+        # that mostly sits inside a higher-confidence one is dropped. NanoDet
+        # emits such "container"/fragment boxes that plain IoU-NMS misses.
+        self.contain_iou = 0.6
+        self.model_path = model_path
+        self.w = self.h = 416
+        self.reg_max = 7
+        self.project = np.arange(self.reg_max + 1, dtype=np.float32)
+        # ImageNet BGR mean/std used by the NanoDet OpenCV-Zoo demo.
+        self.mean = np.array([103.53, 116.28, 123.675], dtype=np.float32)
+        self.std = np.array([57.375, 57.12, 58.395], dtype=np.float32)
+        cv2.setNumThreads(int(num_threads))
+        self.net = cv2.dnn.readNetFromONNX(model_path)
+        self.out_names = list(self.net.getUnconnectedOutLayersNames())
+        self._acache = {}
+
+    def _anchors(self, n, stride):
+        a = self._acache.get(n)
+        if a is None:
+            f = int(round(n ** 0.5))
+            xv, yv = np.meshgrid(np.arange(f) * stride, np.arange(f) * stride)
+            cx = xv.flatten() + 0.5 * (stride - 1)
+            cy = yv.flatten() + 0.5 * (stride - 1)
+            a = np.column_stack((cx, cy)).astype(np.float32)
+            self._acache[n] = a
+        return a
+
+    def _run_on_roi(self, roi, enabled_classes, offset_x, offset_y):
+        h, w = roi.shape[:2]
+        r = cv2.resize(roi, (self.w, self.h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        r = (r - self.mean) / self.std
+        self.net.setInput(cv2.dnn.blobFromImage(r))
+        outs = self.net.forward(self.out_names)
+        return self._decode(outs, w / self.w, h / self.h, w, h,
+                            enabled_classes, offset_x, offset_y)
+
+    def _decode(self, outs, sx, sy, w, h, enabled_classes, ox, oy):
+        bd = 4 * (self.reg_max + 1)
+        cls = {o.shape[1]: o for o in outs if o.shape[-1] != bd}
+        bbx = {o.shape[1]: o for o in outs if o.shape[-1] == bd}
+        boxes, scores, clsids = [], [], []
+        for n in sorted(cls, reverse=True):
+            if n not in bbx:
+                continue
+            stride = self.w / (n ** 0.5)
+            cs, bp = cls[n], bbx[n]
+            if cs.ndim == 3:
+                cs = cs[0]
+            if bp.ndim == 3:
+                bp = bp[0]
+            A = cs.shape[0]
+            b = bp.reshape(A, 4, self.reg_max + 1)
+            e = np.exp(b - b.max(axis=2, keepdims=True))
+            soft = e / e.sum(axis=2, keepdims=True)
+            dist = (soft * self.project).sum(axis=2) * stride
+            ci = cs.argmax(axis=1)
+            sc = cs[np.arange(A), ci]
+            m = sc >= self.conf_thresh
+            m &= ~np.isin(ci, tuple(EXCLUDED_TWO_WHEELER_CLASSES))
+            if enabled_classes:
+                m &= np.isin(ci, list(enabled_classes))
+            if not m.any():
+                continue
+            idx = np.nonzero(m)[0]
+            an = self._anchors(n, stride)
+            ax, ay, d = an[idx, 0], an[idx, 1], dist[idx]
+            x1 = np.clip(ax - d[:, 0], 0, self.w); y1 = np.clip(ay - d[:, 1], 0, self.h)
+            x2 = np.clip(ax + d[:, 2], 0, self.w); y2 = np.clip(ay + d[:, 3], 0, self.h)
+            valid = (x2 > x1) & (y2 > y1)
+            if not valid.any():
+                continue
+            boxes.append(np.stack([x1[valid], y1[valid], x2[valid], y2[valid]], axis=1))
+            scores.append(sc[idx][valid]); clsids.append(ci[idx][valid])
+        if not boxes:
+            return []
+        B = np.concatenate(boxes); S = np.concatenate(scores); C = np.concatenate(clsids)
+        wh = np.column_stack([B[:, 0], B[:, 1], B[:, 2] - B[:, 0], B[:, 3] - B[:, 1]])
+        idxs = np.array(cv2.dnn.NMSBoxes(
+            wh.tolist(), S.tolist(), self.conf_thresh, self.iou_thresh)).flatten()
+        # IoU-NMS misses *containment*: NanoDet often emits a big box around a
+        # vehicle (or spanning two adjacent trucks) whose IoU with the tight box
+        # is low, so both survive and the tracker mints a second track. Drop any
+        # box that is mostly inside a higher-confidence one.
+        order = idxs[np.argsort(-S[idxs])]
+        keep = []
+        for i in order:
+            area_i = (B[i, 2] - B[i, 0]) * (B[i, 3] - B[i, 1])
+            redundant = False
+            for j in keep:
+                area_j = (B[j, 2] - B[j, 0]) * (B[j, 3] - B[j, 1])
+                iw = max(0.0, min(B[i, 2], B[j, 2]) - max(B[i, 0], B[j, 0]))
+                ih = max(0.0, min(B[i, 3], B[j, 3]) - max(B[i, 1], B[j, 1]))
+                inter = iw * ih
+                small = min(area_i, area_j)
+                if small > 0 and inter / small > self.contain_iou:
+                    redundant = True
+                    break
+            if not redundant:
+                keep.append(i)
+        out_list = []
+        for i in keep:
+            ix1, iy1 = int(max(0, B[i, 0] * sx)), int(max(0, B[i, 1] * sy))
+            ix2, iy2 = int(min(w, B[i, 2] * sx)), int(min(h, B[i, 3] * sy))
+            if ix2 <= ix1 or iy2 <= iy1:
+                continue
+            cid = int(C[i])
+            out_list.append({
+                'bbox': (ix1 + ox, iy1 + oy, ix2 + ox, iy2 + oy),
+                'centroid': ((ix1 + ix2) // 2 + ox, (iy1 + iy2) // 2 + oy),
+                'confidence': float(S[i]), 'class_id': cid,
+                'label': _VEHICLE_NAMES.get(cid, f'cls_{cid}'),
+            })
+        return out_list
+
+    def detect(self, frame, enabled_classes=None):
+        return self._run_on_roi(frame, enabled_classes, 0, 0)
+
+    def detect_roi(self, frame, roi_points, enabled_classes=None):
+        if roi_points is None or len(roi_points) < 3:
+            return self.detect(frame, enabled_classes)
+        h, w = frame.shape[:2]
+        pts = np.array(roi_points, dtype=np.int32)
         cx1, cy1 = int(max(0, pts[:, 0].min())), int(max(0, pts[:, 1].min()))
         cx2, cy2 = int(min(w, pts[:, 0].max())), int(min(h, pts[:, 1].max()))
         if cx2 <= cx1 or cy2 <= cy1: return []
@@ -1781,6 +1955,14 @@ def main():
         detector    = YoloNcnn(model_param=model_param, conf_thresh=cfg.conf_thresh,
                                num_threads=cfg.threads, input_wh=model_wh)
         print(f"[main] YOLO11 ncnn loaded ({model_label}, {cfg.threads} threads)")
+    elif cfg.detector == "opencv":
+        detector    = CvDnnNanoDet(model_path=cfg.dnn_model,
+                                   conf_thresh=cfg.conf_thresh, num_threads=cfg.threads)
+        print(f"[main] OpenCV DNN NanoDet-Plus ({cfg.dnn_model}, {cfg.threads} threads)")
+    elif cfg.detector == "nanodet":
+        detector    = NanoDetNcnn(model_param=cfg.dnn_model,
+                                   conf_thresh=cfg.conf_thresh, num_threads=cfg.threads)
+        print(f"[main] NanoDet-Plus ncnn ({cfg.dnn_model}, {cfg.threads} threads)")
     else:
         detector    = HybridDetector(conf_thresh=cfg.conf_thresh,
                                      motion_scale=cfg.motion_scale,

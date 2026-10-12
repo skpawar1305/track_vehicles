@@ -141,6 +141,8 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_MODEL` | `yolo26n` | Model family (`models/<name>_ncnn_<imgsz>/`) — also `"model"` in `config.json` |
 | `TRACKER_MODEL_IMGSZ` | `320x320` | Model input `HxW`, matched to the ROI aspect — also `"model_imgsz"` in `config.json` |
 | `TRACKER_INT8` | `1` | Use `model_int8.ncnn.param` — also `"int8"` in `config.json` |
+| `TRACKER_DETECTOR` | `hybrid` | `hybrid` (motion-gated YOLO) · `motion` · `yolo` · `nanodet` (ncnn) · `opencv` (`cv2.dnn` ONNX) — also `"detector"` in `config.json` |
+| `TRACKER_DNN_MODEL` | – | Model path for the `nanodet`/`opencv` detectors — also `"dnn_model"` in `config.json` |
 | `TRACKER_THREADS` | `4` | ncnn inference threads (also settable as `"threads"` in `config.json`) |
 | `TRACKER_MOTION_HOLD` | `60` | Seconds motion keeps detection armed |
 | `TRACKER_MOTION_HEARTBEAT` | `3` | Idle YOLO cadence (s) |
@@ -342,6 +344,19 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
 - Copy frames handed between threads; OpenCV may reuse the decode buffer.
 - Ultralytics' ncnn export mis-compiles non-square graphs; use `pnnx` directly (handled by
   `tools/export_model.py`).
+- **Drop NanoDet "container" boxes by containment.** The `nanodet`/`opencv` detectors can
+  return a loose box around a vehicle — or spanning two adjacent trucks — that IoU-NMS misses
+  because its IoU with the tight box is low. Both paths drop any box mostly inside a
+  higher-confidence one, so the tracker does not mint a phantom second track.
+- **The NVR can be the RTSP source (`"relay": false`) once Stream Encryption is off.** The
+  Prama NVR (`192.168.225.150`) uses **MD5** RTSP Digest, so FFmpeg/OpenCV authenticate
+  directly and `rtsp_relay` is not needed. Channel map: ch1 = `192.168.225.70` (embankment),
+  ch2 = `192.168.225.71` (dumper site); substreams are `640x360`
+  (`/Streaming/Channels/202`). **`Platform Access ▸ Stream Encryption` must be OFF** — with it
+  on the NVR advertises a valid H.264 SDP `sprop` but scrambles the RTP payload, so decoders
+  emit pure green frames (in-band SPS `profile_idc=150`, slices referencing a nonexistent PPS).
+  Its ONVIF is **HTTP-only**; evidence can come from
+  `http://192.168.225.150/onvif/snapshot/201` (full-res).
 - The NVR has no MJPEG/JPEG endpoint, and browsers cannot play raw RTSP.
 - **SHA-256 RTSP Digest cameras:** FFmpeg (and therefore OpenCV's capture
   backend) negotiates RTSP Digest with MD5 only and returns `401` against a

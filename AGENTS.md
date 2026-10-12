@@ -142,8 +142,19 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   inference input, never decode cost. Net: keep the Pi on the substream — there is no crop /
   zoom / MJPEG trick. (A phone edge with a hardware decoder was tried and rejected too: its
   1080p software YUV→RGB path capped at ~12 fps and throttled, with inference no faster than
-  the Pi's.) The Prama/Hikvision-OEM NVR is no help either: it relays/records the camera's
-  H.264/H.265 only.
+  the Pi's.) The Prama/Hikvision-OEM NVR cannot offload *decode* (it only relays the camera's
+  H.264), but it **can** serve the counting substream directly once Stream Encryption is off
+  — see the NVR bullet below.
+- **The NVR can be the edge's RTSP source — turn Stream Encryption off first.** The Prama NVR
+  (`PT-NRAS2A04-K1` @ `192.168.225.150`) challenges RTSP Digest with **MD5**, so FFmpeg/OpenCV
+  authenticate directly and `rtsp_relay` is not needed (unlike the SHA-256-only cameras). Channel
+  map: **ch1 = `192.168.225.70` (embankment), ch2 = `192.168.225.71` (dumper site)**; substreams
+  are `640x360` (`/Streaming/Channels/202`). **`Platform Access ▸ Stream Encryption` must be
+  OFF**: with it on the NVR advertises a valid H.264 SDP `sprop` but scrambles the RTP payload
+  (in-band SPS `profile_idc=150`, slices referencing a nonexistent PPS), so decoders get pure
+  green/near-black frames — it is *not* an auth or codec problem. The NVR's ONVIF is **HTTP-only**
+  (`http://192.168.225.150/onvif/device_service`); `tools/onvif_media.py` defaults to `https://`,
+  so query it over HTTP. Full-res evidence: `http://192.168.225.150/onvif/snapshot/201`.
 - **Evidence saves the main-stream image, thumbnails from the substream.** The saved
   `<id>.jpg` is the camera's full-resolution main-profile ONVIF snapshot
   (`/onvif-http/snapshot?Profile_1`); the thumbnail is **always** built from the
@@ -167,6 +178,12 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   default 1 s) guarantees one vehicle = one event. Do **not** try to fix this in
   the tracker: it is a detector problem, and any tracker would mint two tracks from
   two boxes.
+- **NanoDet can merge a vehicle into a lingering "container" box — drop by containment.**
+  The `nanodet`/`opencv` detectors (`config.json` `"detector"`) sometimes emit a loose box
+  around a vehicle — or spanning two adjacent trucks — whose IoU with the tight box is low,
+  so plain IoU-NMS keeps both and the tracker mints a phantom track. Both paths drop any box
+  mostly inside a higher-confidence one (intersection-over-min-area > 0.6). The production
+  `hybrid` path uses YOLO and relies on `_merge_cross_class` instead.
 - **Offline is safe, but never prune unsynced rows.** `store.prune` deletes only
   `synced=1` events past `TRACKER_RETENTION_DAYS`; unsynced captures are the only
   copy while the VPS is unreachable and must be kept until `sync.py` gets a 2xx.
