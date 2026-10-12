@@ -264,10 +264,11 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   The 2026-10-12 14:12 `id275 out` 14:12:55 → `id275 in` 14:12:56 pair was a JCB backhoe
   loader swinging its arm across the line (both evidence frames show it, boom extended): one
   machine oscillation committed two opposite crossings a second apart (net zero, but each
-  bumps the totals). `norm_keepout` in `config.json` is a polygon where the gate **freezes** —
-  no side change commits while the centroid is inside it. Place it over the machine's work
-  area. `0.2` confirm distance plus the keep-out together neutralise it; the deeper fix is
-  still to move the line off the machine.
+  bumps the totals). The keep-out polygon (`norm_keepout`, drawn with the **Keep-out** tool in
+  Camera setup and pulled from the server like the line; `config.json` is the fallback) is a
+  polygon where the gate **freezes** — no side change commits while the centroid is inside it.
+  Place it over the machine's work area. `0.2` confirm distance plus the keep-out together
+  neutralise it; the deeper fix is still to move the line off the machine.
 - **Overlap alone can suppress a queued follower — hence the centre/size check.** The
   same-direction crossing de-dupe (`TRACKER_CROSS_DEDUP_S` + `TRACKER_DUP_IOU`) collapses the
   two near-identical class-boxes of one vehicle, but two genuinely queued trucks can overlap

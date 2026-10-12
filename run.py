@@ -346,10 +346,10 @@ class Config:
         with self.lock:
             self.norm_line = data.get("line")
             self.norm_roi = data.get("roi")
-            # A remote config may carry a keep-out polygon; only overwrite the
-            # Pi-local one when it actually provides coordinates (the VPS config
-            # has no drawing UI for it, so it usually sends nothing).
-            if data.get("keepout"):
+            # The dashboard is the source of truth for the keep-out polygon too
+            # (drawn in Camera setup). Apply it, including a clear back to None,
+            # when the key is present so the UI can both set and remove it.
+            if "keepout" in data:
                 self.norm_keepout = data["keepout"]
                 self.keepout = None
             self.flip_sides = bool(data.get("flip_sides", False))
