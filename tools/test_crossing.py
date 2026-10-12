@@ -52,6 +52,36 @@ class Obj:
         self.class_id = 7
         self.confidence = 0.8
 
+    @classmethod
+    def from_span(cls, tid, cx, top, bottom, w=64):
+        """A box with an explicit top/bottom edge (so the top can flap — a
+        machine's arm/load — while the ground-contact bottom stays put)."""
+        obj = cls(tid, cx, (top + bottom) / 2, w, bottom - top)
+        obj.bbox = (cx - w / 2, float(top), cx + w / 2, float(bottom))
+        return obj
+
+
+# The point fed to the production gate: the centroid (current prod) or the
+# box's bottom edge (the ground-contact "tail", the Qengineering-style probe).
+PROBE_CENTROID, PROBE_BOTTOM = "centroid", "bottom"
+
+
+class _Probe:
+    """Presents a chosen probe point to CrossingGate as the 'centroid'."""
+    __slots__ = ("track_id", "centroid", "age", "bbox")
+
+    def __init__(self, obj, point):
+        self.track_id = obj.track_id
+        self.centroid = point
+        self.age = obj.age
+        self.bbox = obj.bbox
+
+
+def probe_obj(obj, probe):
+    if probe == PROBE_BOTTOM:
+        return _Probe(obj, (obj.centroid[0], obj.bbox[3]))
+    return obj
+
 
 def linspace(a, b, n):
     n = max(2, n)
@@ -92,7 +122,7 @@ def rapid_reversal_ys():
     return linspace(0.60 * H, 0.68 * H, 8) + linspace(0.68 * H, 0.45 * H, 10)
 
 
-def simulate(ys, rearm_frac=0.2, confirm_frac=CONFIRM_FRAC, cx=CX):
+def simulate(ys, rearm_frac=0.2, confirm_frac=CONFIRM_FRAC, cx=CX, probe=PROBE_CENTROID):
     """Run one track through the gate (mirrors run.py's per-frame checks)."""
     gate = CrossingGate(min_age=1, rearm_frac=rearm_frac, confirm_frac=confirm_frac)
     events = []
@@ -100,13 +130,13 @@ def simulate(ys, rearm_frac=0.2, confirm_frac=CONFIRM_FRAC, cx=CX):
         frame = i + 1
         obj = Obj(1, cx, y)
         obj.age = frame
-        cr = gate.update(LINE, obj, frame_h=H)
+        cr = gate.update(LINE, probe_obj(obj, probe), frame_h=H)
         if cr in (CROSSING_IN, CROSSING_OUT):
             events.append((round(frame / FPS, 2), "IN" if cr == CROSSING_IN else "OUT", frame))
     return events
 
 
-def simulate_queue(rearm_frac=0.2, confirm_frac=CONFIRM_FRAC):
+def simulate_queue(rearm_frac=0.2, confirm_frac=CONFIRM_FRAC, probe=PROBE_CENTROID):
     """Two tracks crossing one after another (a queue). Both must count, so the
     follower is not collapsed into the leader."""
     gate = CrossingGate(min_age=1, rearm_frac=rearm_frac, confirm_frac=confirm_frac)
@@ -119,10 +149,51 @@ def simulate_queue(rearm_frac=0.2, confirm_frac=CONFIRM_FRAC):
                 continue
             obj = Obj(tid, CX, track[i])
             obj.age = max(1, frame - (20 if tid == 2 else 0))
-            cr = gate.update(LINE, obj, frame_h=H)
+            cr = gate.update(LINE, probe_obj(obj, probe), frame_h=H)
             if cr in (CROSSING_IN, CROSSING_OUT):
                 events.append((tid, round(frame / FPS, 2),
                                "IN" if cr == CROSSING_IN else "OUT"))
+    return events
+
+
+def refit_boxes():
+    """A machine parked straddling the line: the ground-contact bottom edge is
+    fixed at 0.83*H (below the line) while its arm/load flaps the top edge from
+    well above the line to just under the bottom. The centroid is dragged right
+    across the line (well past the confirm distance) and back, with no real
+    transit — the durable false-count the keep-out was meant to stop. The bottom
+    edge never moves."""
+    bottom = 0.83 * H
+    tops = linspace(0.22 * H, 0.80 * H, 30) + linspace(0.80 * H, 0.22 * H, 30)
+    tops += linspace(0.22 * H, 0.80 * H, 30) + linspace(0.80 * H, 0.22 * H, 30)
+    return [(top, bottom) for top in tops]
+
+
+def shadow_boxes():
+    """The bottom probe's own failure mode: the box's *lower* edge is
+    unreliable — a reflection/shadow puddle extends it to the floor, or a
+    detector contracts it up toward the roof — while the roof stays put. The
+    centroid only moves half as far and stays inside the confirm distance; the
+    bottom edge alone is dragged across the line."""
+    top = 0.42 * H
+    bottoms = (linspace(0.44 * H, 1.00 * H, 30)
+               + linspace(1.00 * H, 0.44 * H, 30)
+               + linspace(0.44 * H, 1.00 * H, 30))
+    return [(top, bottom) for bottom in bottoms]
+
+
+def simulate_boxes(boxes, rearm_frac=0.2, confirm_frac=CONFIRM_FRAC, cx=CX,
+                   probe=PROBE_CENTROID):
+    """Feed explicit (top, bottom) boxes through the gate."""
+    gate = CrossingGate(min_age=1, rearm_frac=rearm_frac, confirm_frac=confirm_frac)
+    events = []
+    for i, (top, bottom) in enumerate(boxes):
+        frame = i + 1
+        obj = Obj.from_span(1, cx, top, bottom)
+        obj.age = frame
+        cr = gate.update(LINE, probe_obj(obj, probe), frame_h=H)
+        if cr in (CROSSING_IN, CROSSING_OUT):
+            events.append((round(frame / FPS, 2), "IN" if cr == CROSSING_IN else "OUT", frame))
     return events
 
 
@@ -193,9 +264,51 @@ def main():
     print(f"queue    (confirm={args.confirm_frac}): {len(queue)} events "
           f"{[(t, d) for t, _, d in queue]}")
 
+    # ── Probe comparison: centroid (prod) vs the box's bottom / ground edge ──
+    # On pure translations the two probes only differ by a constant offset, so
+    # every genuine case must keep the same count. The refit case is where they
+    # diverge: a machine parked on the line drags the *centroid* across (arm/
+    # load refits the top edge) while the bottom edge never moves.
+    def counts(evs):
+        return [d for _, d, _ in evs]
+
+    probe_cases = {
+        "wobble": wobble_ys, "passthru": passthrough_ys, "return": true_return_ys,
+        "nudge": nudge_return_ys, "rapid": rapid_reversal_ys,
+    }
+    same = True
+    for name, fn in probe_cases.items():
+        cc = counts(simulate(fn(), args.rearm_frac, args.confirm_frac, probe=PROBE_CENTROID))
+        cb = counts(simulate(fn(), args.rearm_frac, args.confirm_frac, probe=PROBE_BOTTOM))
+        same = same and cc == cb
+        print(f"[probe] {name:9s} centroid={cc}  bottom={cb}")
+
+    q_cent = sorted((t, d) for t, _, d in simulate_queue(args.rearm_frac, args.confirm_frac,
+                                                         probe=PROBE_CENTROID))
+    q_bot = sorted((t, d) for t, _, d in simulate_queue(args.rearm_frac, args.confirm_frac,
+                                                        probe=PROBE_BOTTOM))
+    same = same and q_cent == q_bot
+    print(f"[probe] queue     centroid={q_cent}  bottom={q_bot}")
+
+    boxes = refit_boxes()
+    refit_c = simulate_boxes(boxes, args.rearm_frac, args.confirm_frac, probe=PROBE_CENTROID)
+    refit_b = simulate_boxes(boxes, args.rearm_frac, args.confirm_frac, probe=PROBE_BOTTOM)
+    print(f"refit    centroid ({args.confirm_frac}): {len(refit_c):2d} events {dirs(refit_c)}"
+          f"   <- machine parked on the line must be 0")
+    print(f"refit    bottom   ({args.confirm_frac}): {len(refit_b):2d} events {dirs(refit_b)}")
+
+    sb = shadow_boxes()
+    shadow_c = simulate_boxes(sb, args.rearm_frac, args.confirm_frac, probe=PROBE_CENTROID)
+    shadow_b = simulate_boxes(sb, args.rearm_frac, args.confirm_frac, probe=PROBE_BOTTOM)
+    print(f"shadow   centroid ({args.confirm_frac}): {len(shadow_c):2d} events {dirs(shadow_c)}")
+    print(f"shadow   bottom   ({args.confirm_frac}): {len(shadow_b):2d} events {dirs(shadow_b)}"
+          f"   <- bottom edge's own failure mode")
+
     ok = (len(wobble) == 1 and len(wobble_off) > 1 and len(pass_) == 1
           and len(ret) == 2 and len(nudge) == 1 and len(nudge_old) > 1
-          and len(rapid) == 0 and len(queue) == 2)
+          and len(rapid) == 0 and len(queue) == 2
+          and same and len(refit_c) >= 1 and len(refit_b) == 0
+          and len(shadow_c) == 0 and len(shadow_b) >= 1)
     if args.out:
         render(args.out, args.rearm_frac, wobble_ys())
     if not ok:
