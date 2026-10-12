@@ -336,6 +336,9 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   export, `in0`/`out0` for the older one). The **code default is `hybrid`** (motion-gated
   YOLO26n INT8 `320x320`), and `opencv` is the ONNX `cv2.dnn` variant (~12 fps) — switch
   `detector`/`dnn_model` in `config.json` to change without editing `tracker.env`.
+  A/B over 97 real crossing frames (2026-10-12): Plus-m@416 found **97/97** (94 truck) vs
+  Plus-m@320 88/97 (64 truck) vs YOLO26n INT8@320 73/97 (72) — resolution beats FPS here,
+  so keep @416.
 - `ncnn`'s wheel declares the GUI `opencv-python` (needs libxcb); first-boot.sh replaces
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads

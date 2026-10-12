@@ -353,7 +353,8 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
 model (RangiLyu's official `nanodet-plus-m_416_ncnn`, 1.52 GFLOPs, 30.4 mAP).** Selected
 in `config.json` (`"detector": "nanodet"`); measured ~19 `detect_fps` on the Pi 5. The
 code default is `hybrid` (motion-gated YOLO26n INT8 `320x320`), and `opencv` is the ONNX
-`cv2.dnn` variant (~12 fps).
+`cv2.dnn` variant (~12 fps). A/B over 97 real crossing frames: @416 found 97/97 (94
+truck) vs @320 88/97 (64) vs YOLO26n INT8@320 73/97 (72) — keep @416.
 
 ## Gotchas
 
