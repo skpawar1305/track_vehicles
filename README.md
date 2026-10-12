@@ -81,9 +81,10 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
     so a vehicle that only drifts back and forth at the line is counted once. Set it to `0`
     to disable.
   `TRACKER_MIN_TRACK_AGE` is the only other gate (the run.py pre-filter and `update()`). A
-  **keep-out polygon** (`norm_keepout` in `config.json`) additionally *freezes* the gate
-  while the centroid is inside it — place it over a working excavator/loader that swings
-  across the line. `tools/test_crossing.py` exercises all of the above.
+  **keep-out polygon** — drawn with the **Keep-out** tool in Camera setup, stored as
+  `keepout` in the camera config (`norm_keepout` in `config.json`) — additionally *freezes*
+  the gate while the centroid is inside it; place it over a working excavator/loader that
+  swings across the line. `tools/test_crossing.py` exercises all of the above.
 
 ## Layout
 

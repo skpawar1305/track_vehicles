@@ -2,12 +2,16 @@
   import { setupOpen } from "$lib/stores";
 
   type Pt = [number, number];
-  type Cfg = { line: Pt[] | null; roi: Pt[] | null; flip_sides: boolean; enabled_classes: number[] };
+  type Cfg = {
+    line: Pt[] | null; roi: Pt[] | null; keepout: Pt[] | null;
+    flip_sides: boolean; enabled_classes: number[];
+  };
 
-  let cfg = $state<Cfg>({ line: null, roi: null, flip_sides: false, enabled_classes: [2, 5, 7] });
-  let mode = $state<null | "line" | "area" | "in">(null);
+  let cfg = $state<Cfg>({ line: null, roi: null, keepout: null, flip_sides: false, enabled_classes: [2, 5, 7] });
+  let mode = $state<null | "line" | "area" | "keepout" | "in">(null);
   let dl = $state<Pt[]>([]);
   let da = $state<Pt[]>([]);
+  let dk = $state<Pt[]>([]);
   let msg = $state("");
   let snapSrc = $state("");
   let imgEl = $state<HTMLImageElement | undefined>();
@@ -15,8 +19,11 @@
 
   let hasLine = $derived(!!(cfg.line && cfg.line.length === 2));
   let hasRoi = $derived(!!(cfg.roi && cfg.roi.length >= 3));
+  let hasKeepout = $derived(!!(cfg.keepout && cfg.keepout.length >= 3));
   let roiPoints = $derived(hasRoi ? cfg.roi!.map((p) => p.join(",")).join(" ") : "");
+  let keepoutPoints = $derived(hasKeepout ? cfg.keepout!.map((p) => p.join(",")).join(" ") : "");
   let daPoints = $derived(da.map((p) => p.join(",")).join(" "));
+  let dkPoints = $derived(dk.map((p) => p.join(",")).join(" "));
   let ioPos = $derived.by(() => {
     if (!cfg.line || cfg.line.length !== 2) return { i: [0, 0] as Pt, o: [0, 0] as Pt };
     const A = cfg.line[0], B = cfg.line[1];
@@ -40,9 +47,13 @@
     return (B[0] - A[0]) * (p[1] - A[1]) - (B[1] - A[1]) * (p[0] - A[0]);
   }
 
-  function setMode(m: typeof mode, clearDraft = false) {
+  function setMode(m: typeof mode) {
     mode = m;
-    if (clearDraft) dl = [];
+  }
+
+  // A tap closes the current polygon if it lands near its first point.
+  function nearFirst(draft: Pt[], p: Pt) {
+    return draft.length >= 3 && Math.hypot(p[0] - draft[0][0], p[1] - draft[0][1]) < 0.05;
   }
 
   function onClick(ev: MouseEvent) {
@@ -53,24 +64,31 @@
       dl = [...dl, p];
       if (dl.length === 2) { cfg.line = dl.slice(); dl = []; mode = null; }
     } else if (mode === "area") {
-      if (da.length >= 3 && Math.hypot(p[0] - da[0][0], p[1] - da[0][1]) < 0.05) {
-        cfg.roi = da.slice(); da = []; mode = null;
-      } else da = [...da, p];
+      if (nearFirst(da, p)) { cfg.roi = da.slice(); da = []; mode = null; }
+      else da = [...da, p];
+    } else if (mode === "keepout") {
+      if (nearFirst(dk, p)) { cfg.keepout = dk.slice(); dk = []; mode = null; }
+      else dk = [...dk, p];
     } else if (mode === "in" && cfg.line) {
       cfg.flip_sides = side(cfg.line, p) < 0; mode = null;
     }
   }
 
-  function reset() { cfg.line = null; cfg.roi = null; dl = []; da = []; mode = null; }
+  function reset() {
+    cfg.line = null; cfg.roi = null; cfg.keepout = null;
+    dl = []; da = []; dk = []; mode = null;
+  }
 
   async function save() {
     if (da.length >= 3) { cfg.roi = da.slice(); da = []; mode = null; }
+    if (dk.length >= 3) { cfg.keepout = dk.slice(); dk = []; mode = null; }
     msg = "saving…";
     try {
       const r = await fetch("/api/config", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          line: cfg.line, roi: cfg.roi, flip_sides: cfg.flip_sides, enabled_classes: cfg.enabled_classes,
+          line: cfg.line, roi: cfg.roi, keepout: cfg.keepout, flip_sides: cfg.flip_sides,
+          enabled_classes: cfg.enabled_classes,
           source_w: imgEl?.naturalWidth, source_h: imgEl?.naturalHeight,
         }),
       });
@@ -89,8 +107,14 @@
         {#if hasRoi}
           <polygon points={roiPoints} fill="rgba(100,180,255,.15)" stroke="#64b4ff" stroke-width="2" vector-effect="non-scaling-stroke" />
         {/if}
+        {#if hasKeepout}
+          <polygon points={keepoutPoints} fill="rgba(239,68,68,.15)" stroke="#ef4444" stroke-width="2" stroke-dasharray="5" vector-effect="non-scaling-stroke" />
+        {/if}
         {#if da.length >= 2}
           <polyline points={daPoints} fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="4" vector-effect="non-scaling-stroke" />
+        {/if}
+        {#if dk.length >= 2}
+          <polyline points={dkPoints} fill="none" stroke="#ef4444" stroke-width="2" stroke-dasharray="4" vector-effect="non-scaling-stroke" />
         {/if}
         {#if hasLine}
           <line x1={cfg.line![0][0]} y1={cfg.line![0][1]} x2={cfg.line![1][0]} y2={cfg.line![1][1]} stroke="#3b82f6" stroke-width="3" vector-effect="non-scaling-stroke" />
@@ -100,16 +124,20 @@
         {#each dl as p}
           <circle cx={p[0]} cy={p[1]} r="0.008" fill="#f59e0b" vector-effect="non-scaling-stroke" />
         {/each}
+        {#each dk as p}
+          <circle cx={p[0]} cy={p[1]} r="0.008" fill="#ef4444" vector-effect="non-scaling-stroke" />
+        {/each}
       </svg>
     </div>
     <div class="tools">
-      <button class:active={mode === "line"} onclick={() => setMode("line", true)}>Line</button>
+      <button class:active={mode === "line"} onclick={() => { dl = []; setMode("line"); }}>Line</button>
       <button class:active={mode === "area"} onclick={() => setMode("area")}>Area</button>
+      <button class:active={mode === "keepout"} onclick={() => { dk = []; setMode("keepout"); }}>Keep-out</button>
       <button class:active={mode === "in"} onclick={() => setMode("in")}>IN side</button>
       <button onclick={reset}>Reset</button>
       <button class="primary" onclick={save}>Save</button>
       <span class="msg">{msg}</span>
     </div>
-    <p class="hint">Line: tap 2 points. Area: tap points, tap the first point (or Save) to close. IN side: tap where traffic enters. Then Save.</p>
+    <p class="hint">Line: tap 2 points. Area: tap points, tap the first point (or Save) to close. Keep-out: the same, for the working machine's zone — crossings freeze there. IN side: tap where traffic enters. Then Save.</p>
   </div>
 {/if}
