@@ -118,6 +118,33 @@ class Store:
             )
             self.conn.commit()
 
+    def requeue_present_images(self, capture_dir):
+        """Re-queue rows marked synced whose image is still on disk.
+
+        A successful upload deletes the local image, so ``synced=1`` with the
+        image still present means that mark never corresponded to a delivered
+        capture — e.g. the event was marked done while the VPS was unreachable
+        (the internet outage bug). Re-queueing makes sync re-upload it; the
+        server de-dupes by event id, so a row that *did* land is a harmless
+        no-op that gets cleaned up here. Self-heals the "synced but missing on
+        the dashboard" state without any operator action.
+        """
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT id, image_path FROM events "
+                "WHERE synced=1 AND image_path IS NOT NULL",
+            ).fetchall()
+            ids = [r[0] for r in rows
+                   if os.path.isfile(os.path.join(capture_dir, r[1]))]
+            if ids:
+                self.conn.executemany(
+                    "UPDATE events SET synced=0, synced_at=NULL, "
+                    "sync_attempts=0, last_error=NULL WHERE id=?",
+                    [(i,) for i in ids],
+                )
+                self.conn.commit()
+            return len(ids)
+
     def total_counts(self):
         with self.lock:
             cur = self.conn.execute(

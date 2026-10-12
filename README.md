@@ -283,6 +283,14 @@ count or a dead worker is not. Invariants the code upholds:
   permanent (bad token/malformed) and logs `PERMANENT …; keeping row`, recording
   `sync_attempts`/`last_error` so the stuck event is visible. Only a genuine
   `2xx` marks it synced.
+- **A "synced" mark is verified by deleting the image — and self-heals when it
+  isn't.** A successful upload deletes the local JPEG, so a row marked
+  `synced=1` whose image is *still on disk* means the mark never reached the
+  server (e.g. it was set while the VPS was unreachable during an internet
+  outage). `sync.py` sweeps those rows (`TRACKER_SYNC_RESYNC_INTERVAL`, default
+  300 s) and re-uploads them; the VPS de-dupes by id, so it is idempotent. A
+  missing image is *retried*, not silently dropped, until
+  `TRACKER_SYNC_GIVEUP_HOURS` (default 24) before it is given up.
 - **Ingest is atomic.** The VPS writes each uploaded image to a temp file and
   renames it into place, so a crash mid-write can never leave a truncated JPEG
   to be served.

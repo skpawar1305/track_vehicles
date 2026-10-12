@@ -35,7 +35,12 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   so a static scene is not treated as a stall. `stimeout`/`rw_timeout` bound
   `cap.read()`.
 - **Offline never loses data.** `store.prune` deletes only `synced=1` rows; the
-  sync worker deletes local files only after a `2xx`.
+  sync worker deletes local files only after a `2xx`. A successful upload
+  deletes the image, so `synced=1` with the image *still on disk* means the mark
+  never reached the server (the outage bug); `sync.py` sweeps those rows
+  (`Store.requeue_present_images`, throttled by `TRACKER_SYNC_RESYNC_INTERVAL`)
+  and re-uploads them — idempotent, since the VPS de-dupes by id. A missing
+  image is retried, never silently dropped, until `TRACKER_SYNC_GIVEUP_HOURS`.
 - **Permanent upload errors keep the row.** `sync.py` treats `4xx` as permanent,
   logs it, and records `sync_attempts`/`last_error`; only `2xx` marks synced.
 - **Atomic ingest.** The VPS writes uploads to a temp file then renames, so a
