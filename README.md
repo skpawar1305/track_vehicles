@@ -347,6 +347,12 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
 `256x256` ≈ 46 (smaller = faster, lower confidence). `run.py` logs
 `[stat] track=<fps> detect=<fps> tracks=<n>` every 10 s so the split is visible on-device.
 
+**Current production detector = `hybrid` (motion-gated) → `HybridDetector`/`YoloNcnn`
+with the YOLO26n INT8 `320x320` model (2 threads).** This is the best-performing
+configuration measured on the Pi 5 (~24 `detect_fps` at ~71 °C); the other detectors
+(`motion`, `nanodet`, `opencv`) and `640x640` all did worse here, so don't switch
+without a measured win.
+
 ## Gotchas
 
 - **ncnn use-after-free:** keep the input `Mat` alive until after `extractor.extract()`.

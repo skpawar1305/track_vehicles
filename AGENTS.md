@@ -325,6 +325,11 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   cuts the live preview to ~9 fps. Select it without root via
   `config.json` `{"model":"yolo26n","model_imgsz":"640x640","int8":true}` (the model
   dir must exist); revert `model_imgsz` to `320x320` to go back.
+- **The current detector is the best-performing one — keep it.** Production runs
+  `"detector": "hybrid"` (motion-gated) with `"model": "yolo26n"`,
+  `"model_imgsz": "320x320"`, `"int8": true`, `"threads": 2`; measured ~24 `detect_fps`
+  at ~71 °C on the Pi 5 substream. The alternatives (`motion`, `nanodet`, `opencv`) and
+  640×640 all performed worse here, so do not switch without a measured win.
 - `ncnn`'s wheel declares the GUI `opencv-python` (needs libxcb); first-boot.sh replaces
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads
