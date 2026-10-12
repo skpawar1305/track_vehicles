@@ -196,8 +196,9 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_CAPTURE_PIPELINE` | – | GStreamer pipeline, e.g. Pi hardware `v4l2h264dec` |
 | `TRACKER_RTSP_RELAY` | `0` | Route capture through `RtspRelay` for SHA-256 Digest cameras |
 | `TRACKER_CAM2_URL` | – | Optional second camera substream shown raw on `/live` (no detection) |
-| `TRACKER_CAPTURE_MAIN_STREAM` | `1` | Saved image = main-profile ONVIF snapshot; set `0` to save the substream frame instead |
-| `TRACKER_CAPTURE_URL` | derived | Full-res crossing still URL; used when `TRACKER_CAPTURE_MAIN_STREAM=1` |
+| `TRACKER_CAPTURE_MAIN_STREAM` | `1` | Full image: `1`/`snap` = ONVIF main-profile snapshot · `0`/`sub` = substream frame · `rtsp` = decode a main-stream frame (no fresher; see Gotchas) |
+| `TRACKER_CAPTURE_URL` | derived | Full-res ONVIF snapshot URL (snapshot mode) |
+| `TRACKER_CAPTURE_RTSP` | derived | Main RTSP URL for `rtsp` mode (derived from the substream channel: `…/102` → `…/101`) |
 | `TRACKER_CAPTURE_MAX_AGE` | `1.5` | Queue age (s) after which the main-stream fetch is skipped |
 | `TRACKER_DUP_IOU` | `0.6` | Same-vehicle IoU: detector cross-class NMS + crossing de-dupe |
 | `TRACKER_DEDUP_CENTER_FRAC` | `0.03` | Same-vehicle centre tolerance (frame width) for the crossing de-dupe, so a queued follower isn't collapsed |
@@ -311,6 +312,14 @@ count or a dead worker is not. Invariants the code upholds:
   container timestamp counts as alive, so a legitimately static (noise-free)
   scene is not mistaken for a stall. `stimeout`/`rw_timeout` bound a blocked
   `cap.read()`.
+- **The reader reads unpaced, so it stays at the live edge.** Pacing the reads to
+  the reported native fps (`time.sleep(1/fps - elapsed)`) made the loop run a hair
+  below the true ~25 fps source, so the frame the gate saw fell further behind
+  wall-clock every second (~3.5 s/min, unbounded — FFmpeg's UDP buffer defaults to
+  unlimited). After ~11 min the crossing was detected ~26 s late and the evidence
+  main image showed the scene after the vehicle had gone. Unpaced, `cap.read()`
+  blocks when caught up (lag ~0) and drains fast after a reconnect. Do not re-add
+  sleep-based pacing.
 - **In-memory counts and the DB never diverge.** If the capture queue is full,
   the crossing is persisted inline from the substream frame instead of dropped.
   A locked DB is retried (`busy_timeout` + a short retry) rather than fatal.
@@ -434,17 +443,21 @@ A/B over 97 real crossing frames: PicoDet-S@320 found 97/97 (93 truck) ≈ NanoD
   The saved `<id>.jpg` is the camera's main-profile ONVIF snapshot
   (`/onvif-http/snapshot?Profile_1`, camera-side JPEG, SHA-256 Digest), while the
   **thumbnail shown in the timeline is always the 640×360 substream frame from the
-  crossing instant**, so it shows the vehicle at the line. Set
-  `TRACKER_CAPTURE_MAIN_STREAM=0` to save the crossing substream frame as the full
-  image too: requesting the main-profile snapshot
-  can perturb the counting substream on the PT-NC120D3 (partial/blurry stills,
-  occasional substream glitch), which is why that was once the default. The fetch
-  runs on the capture worker
+  crossing instant**, so it shows the vehicle at the line. Modes via
+  `TRACKER_CAPTURE_MAIN_STREAM` / `config.json` `capture_main_stream`: `1`/`snap`
+  (default, the snapshot), `0`/`sub` (save the crossing substream frame as the full
+  image too), `rtsp` (decode a main-stream frame). Snapshot mode can perturb the
+  counting substream on the PT-NC120D3 (partial/blurry stills, occasional substream
+  glitch), which is why `0` was once the default. The fetch runs on the capture worker
   (never the track loop), reuses a `requests.Session`, skips a stale still
   (`TRACKER_CAPTURE_MAX_AGE`, default 1.5 s), falls back to the substream frame,
   and stores **both** `<id>.jpg`
   (main stream) and `<id>_sub.jpg` (crossing frame, served at `/sub/<id>`) when it
   succeeds. URL/creds default to the stream URL's (`TRACKER_CAPTURE_URL`/`_USER`/`_PASSWORD`).
+  **`rtsp` mode was tried and does not help:** a fresh RTSP connect starts at the
+  NVR's last I-frame (main GOP=50 ≈ 2 s) and costs ~1.4 s + a 1.2 MB file. The real
+  "main image lags the crossing" was the reader drifting behind live (see the
+  unpaced-reader invariant above), fixed by removing the pacing sleep.
 - **One vehicle can arrive as two class-boxes — de-duplicated.** The INT8 detector
   sometimes fires two near-identical boxes for one vehicle with different winning
   classes (car/truck), which would otherwise become two tracks and two counts. A

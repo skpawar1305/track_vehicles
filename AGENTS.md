@@ -165,15 +165,33 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
 - **Evidence saves the main-stream image, thumbnails from the substream.** The saved
   `<id>.jpg` is the camera's full-resolution main-profile ONVIF snapshot
   (`/onvif-http/snapshot?Profile_1`); the thumbnail is **always** built from the
-  crossing substream frame, so the timeline shows the vehicle at the line. Set
-  `TRACKER_CAPTURE_MAIN_STREAM=0` to save the substream frame as the full image too:
-  on the PT-NC120D3 asking the camera for a main-profile still can perturb the
-  counting substream (partial/blurry JPEGs, occasional substream glitch), which is
-  why that was once the default. The fetch runs on the capture worker (never the
-  track loop), reuses a `requests.Session` (keeps TLS + the digest nonce alive),
-  skips a stale still (`TRACKER_CAPTURE_MAX_AGE`, default 1.5 s in the queue), falls
-  back to the substream frame, and writes `<id>.jpg` (main stream) plus `<id>_sub.jpg`
-  (crossing substream frame) when it succeeds.
+  crossing substream frame, so the timeline shows the vehicle at the line. Modes via
+  `TRACKER_CAPTURE_MAIN_STREAM` / `config.json` `capture_main_stream`: `1`/`snap`
+  (default, the snapshot), `0`/`sub` (save the substream frame as the full image
+  too), or `rtsp` (decode a frame off the main RTSP stream). On the PT-NC120D3
+  asking for a main-profile still can perturb the counting substream
+  (partial/blurry JPEGs, occasional substream glitch), which is why `0` was once the
+  default. The fetch runs on the capture worker (never the track loop), reuses a
+  `requests.Session` (keeps TLS + the digest nonce alive), skips a stale still
+  (`TRACKER_CAPTURE_MAX_AGE`, default 1.5 s in the queue), falls back to the
+  substream frame, and writes `<id>.jpg` (main stream) plus `<id>_sub.jpg`
+  (crossing substream frame) when it succeeds. **`rtsp` was tried and does NOT help:**
+  a fresh RTSP connect starts at the NVR's last I-frame (main GOP=50 ≈ 2 s) and the
+  open costs ~1.4 s + a 1.2 MB file, so it is no fresher than the snapshot. The
+  mismatch people actually saw ("the main image lags the crossing") was the reader
+  drifting behind live — see the reader bullet — not the snapshot.
+- **The reader must read UNPACED, or it drifts behind live.** `reader_loop` used to
+  `time.sleep(1/fps - elapsed)` to pace to the reported native fps. The loop's real
+  rate was a hair below the ~25 fps source (the reported `CAP_PROP_FPS` was 24.4), so
+  each second the container timestamp fell further behind wall-clock — measured
+  **~3.5 s/min** — and FFmpeg's UDP `rtbufsize` defaults to unlimited, so it buffered
+  the whole backlog instead of dropping. After ~11 min the substream frame the gate
+  saw was ~26 s stale, so the crossing was detected ~26 s late and the main evidence
+  image (fetched at that delayed time) showed the scene after the vehicle had gone.
+  Unpaced, `cap.read()` blocks on the source when caught up and drains fast after a
+  reconnect: lag stays ~0 (measured flat over 40 s). Do not re-add sleep-based
+  pacing. If the reader still can't keep up with 25 fps under inference load, bound
+  the backlog instead (small `rtbufsize` / a drift-triggered reopen), not by pacing.
 - **One vehicle often produces two class-boxes — dedupe at the detector.** The
   INT8 model frequently fires two near-identical boxes with different winning
   classes (car+truck, bus+truck; IoU 0.76–0.93) for one vehicle. Per-class NMS

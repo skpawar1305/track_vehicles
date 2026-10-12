@@ -146,13 +146,39 @@ CROSS_DEDUP_S = float(os.environ.get("TRACKER_CROSS_DEDUP_S", "1.0"))
 # vehicle*: their centres within this fraction of the frame width AND their
 # areas within a 2x ratio. A follower's centre is further away, so it survives.
 DEDUP_CENTER_FRAC = float(os.environ.get("TRACKER_DEDUP_CENTER_FRAC", "0.03"))
-# Evidence: the saved image is the camera's main-profile ONVIF snapshot (the
-# camera encodes the JPEG, so no Pi decode) and the thumbnail is always built
-# from the substream crossing frame, so the timeline shows the vehicle at the
-# line. Set TRACKER_CAPTURE_MAIN_STREAM=0 to save the substream frame as the
-# full image too (requesting the main-profile snapshot can perturb the counting
-# substream on some cameras).
-CAPTURE_MAIN_STREAM = os.environ.get("TRACKER_CAPTURE_MAIN_STREAM", "1") == "1"
+# Evidence: the saved full image comes from the camera's main profile; the
+# thumbnail is always built from the substream crossing frame, so the timeline
+# shows the vehicle at the line.
+#   "1"/"snap" (default) — the camera's ONVIF main-profile snapshot; the camera
+#                          encodes the JPEG (no Pi video decode) and it tracks the
+#                          live stream (measured live via the burned-in OSD)
+#   "rtsp"               — decode a fresh main-stream frame per crossing. Measured
+#                          NOT to help: a fresh RTSP connect starts at the NVR's
+#                          last I-frame (main GOP=50 ≈ 2 s) and costs ~1.4 s open
+#                          + 1.2 MB, so it is no fresher than the snapshot.
+#   "0"/"sub"            — use the substream crossing frame as the full image
+# The real evidence-vs-crossing mismatch was the *reader* drifting behind live
+# (see reader_loop), not the snapshot; fixing the reader is what aligns them.
+# Also settable in config.json as "capture_main_stream" (no root needed).
+CAPTURE_MAIN_MODE = os.environ.get("TRACKER_CAPTURE_MAIN_STREAM", "1").lower()
+
+
+def _derive_main_rtsp(url):
+    """Map a substream RTSP URL's channel to its main-stream sibling.
+
+    ``…/Streaming/Channels/102`` -> ``…/Streaming/Channels/101`` (and ``202`` ->
+    ``201``); the NVR/camera encode the full field of view on both profiles.
+    Returns "" if the URL doesn't look like a channel path.
+    """
+    if not url.startswith("rtsp://"):
+        return ""
+    base, _, _ = url.partition("?")           # drop any query string
+    import re
+    m = re.search(r"(/Streaming/Channels/[12])02?$", base)
+    if not m:
+        return ""
+    return base[:m.start()] + m.group(1) + "01"
+
 
 
 def _counting_classes(classes):
@@ -251,15 +277,17 @@ class Config:
         if not self.live2_url and _live:
             self.live2_url = _live.replace("/api/live", "/api/live2")
         self.live2_wanted = False
-        # Evidence saves the full-resolution main-profile ONVIF still (the camera
-        # encodes the JPEG, so no Pi decode); the thumbnail comes from the
-        # substream crossing frame. Set TRACKER_CAPTURE_MAIN_STREAM=0 to save the
-        # substream frame as the full image too; the main-stream fetch falls back
-        # to the substream frame on failure anyway. URL/user/password default to
-        # the stream URL's; override with TRACKER_CAPTURE_URL / _USER / _PASSWORD.
+        # Evidence saves a full-resolution main-profile frame; the thumbnail
+        # comes from the substream crossing frame. Default mode "1" uses the
+        # ONVIF main-profile snapshot (no Pi decode); see CAPTURE_MAIN_MODE. Any
+        # failure falls back to the substream frame. URL/user/password default to
+        # the stream URL's; override with TRACKER_CAPTURE_URL / _USER /
+        # _PASSWORD, and the main RTSP URL with TRACKER_CAPTURE_RTSP.
         self.capture_url = os.environ.get("TRACKER_CAPTURE_URL", "")
+        self.capture_rtsp = os.environ.get("TRACKER_CAPTURE_RTSP", "")
         self.capture_user = os.environ.get("TRACKER_CAPTURE_USER", "")
         self.capture_password = os.environ.get("TRACKER_CAPTURE_PASSWORD", "")
+        self.capture_main_mode = CAPTURE_MAIN_MODE
         self._load()
 
     def _load(self):
@@ -299,6 +327,9 @@ class Config:
                 self.dnn_iou  = float(data.get("dnn_iou", self.dnn_iou))
                 self.cam2_url = data.get("cam2_url", self.cam2_url)
                 self.capture_url = data.get("capture_url", self.capture_url)
+                self.capture_rtsp = data.get("capture_rtsp", self.capture_rtsp)
+                self.capture_main_mode = str(
+                    data.get("capture_main_stream", self.capture_main_mode)).lower()
             self._derive_capture()
         except (FileNotFoundError, json.JSONDecodeError):
             pass
@@ -314,8 +345,11 @@ class Config:
             self.capture_user = unquote(u.username or "")
         if not self.capture_password:
             self.capture_password = unquote(u.password or "")
-        if not self.capture_url and CAPTURE_MAIN_STREAM:
-            # The saved evidence image is the main-profile snapshot; the
+        if not self.capture_rtsp:
+            # Main-stream sibling of the substream channel (…/102 -> …/101).
+            self.capture_rtsp = _derive_main_rtsp(self.stream_url)
+        if not self.capture_url and self.capture_main_mode in ("1", "snap", "snapshot"):
+            # Fallback still: the camera's main-profile ONVIF snapshot; the
             # thumbnail still comes from the substream crossing frame.
             self.capture_url = f"https://{u.hostname}/onvif-http/snapshot?Profile_1"
 
@@ -340,7 +374,9 @@ class Config:
                     "tracker": self.tracker,
                     "dnn_conf": self.dnn_conf,
                     "dnn_iou": self.dnn_iou,
-                    "cam2_url": self.cam2_url, "capture_url": self.capture_url}
+                    "cam2_url": self.cam2_url, "capture_url": self.capture_url,
+                    "capture_rtsp": self.capture_rtsp,
+                    "capture_main_stream": self.capture_main_mode}
         with open(CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
 
@@ -1813,8 +1849,6 @@ def reader_loop(cfg, latest):
     cap = None
     relay = None
     relay_url = None
-    last_read_t = 0.0
-    read_interval = 0.0
     prev_gray = None
     last_fresh = time.time()
     last_pos = -1.0
@@ -1873,22 +1907,20 @@ def reader_loop(cfg, latest):
                     print("[reader] Failed to open stream, retrying in 5s...")
                     cap.release(); cap = None; time.sleep(5); continue
                 video_fps = cap.get(cv2.CAP_PROP_FPS)
-                read_interval = 1.0 / video_fps if video_fps > 0 else 0.0
-                last_read_t = time.time()
                 last_fresh = time.time()
                 if cfg.relay and not pipeline:
                     print(f"[reader] Stream via RTSP relay ({video_fps:.2f} fps)")
                 else:
                     print(f"[reader] Stream connected ({video_fps:.2f} fps)")
 
-            # Pace reads to match video's native framerate
-            if read_interval > 0:
-                elapsed = time.time() - last_read_t
-                if elapsed < read_interval:
-                    time.sleep(read_interval - elapsed)
-
+            # Read unpaced. Pacing to 1/fps made the loop slightly slower than
+            # the true ~25 fps source, so the container timestamp fell behind
+            # wall-clock a little every second (~3.5 s/min measured) — the reader
+            # drifted seconds behind live and the evidence main image (fetched at
+            # the delayed crossing) showed the scene after the vehicle had gone.
+            # Unpaced, reads block on the source when caught up (lag stays ~0) and
+            # drain fast after a reconnect, so the reader sits at the live edge.
             ret, frame = cap.read()
-            last_read_t = time.time()
             if not ret:
                 print("[reader] Stream lost, reconnecting...")
                 cap.release(); cap = None; time.sleep(1); continue
@@ -2140,24 +2172,20 @@ def cam2_loop(cfg, live2_q, stop):
         relay.stop()
     print("[cam2] Done")
 
-def fetch_capture_jpeg(cfg, timeout=6.0):
-    """GET one full-resolution still from the camera's main profile.
+def _fetch_snapshot_jpeg(cfg, timeout=6.0):
+    """GET the camera's main-profile ONVIF snapshot (no Pi video decode).
 
-    The camera hardware-encodes the JPEG, so this costs the Pi one HTTP GET and
-    no video decode. Returns bytes, or None on any failure.
+    Returns bytes, or None on any failure. The camera hardware-encodes the JPEG,
+    but its still pipeline lags the live stream by ~2 s on the NVR, so this is
+    now only a fallback when a live RTSP grab is unavailable.
 
     A persistent Session keeps the TLS connection and the digest nonce alive
-    between crossings, so the still is fetched with (ideally) a single
-    round-trip and lands as close as possible to the crossing instant.
-
-    Enabled by default; set `TRACKER_CAPTURE_MAIN_STREAM=0` to return None so
-    the substream crossing frame is saved as the full image and the camera's
-    main encoder is never touched.
+    between calls.
     """
     import requests
     from requests.auth import HTTPDigestAuth
     global _CAPTURE_SESSION
-    if not CAPTURE_MAIN_STREAM or not cfg.capture_url:
+    if not cfg.capture_url:
         return None
     if _CAPTURE_SESSION is None:
         _CAPTURE_SESSION = requests.Session()
@@ -2171,6 +2199,66 @@ def fetch_capture_jpeg(cfg, timeout=6.0):
     except Exception as e:
         _log_throttled("capture_fetch", f"[capture] snapshot fetch failed: {e}", every=60)
     return None
+
+
+def fetch_main_rtsp_jpeg(cfg, timeout=6.0, quality=85):
+    """Decode a frame off the main RTSP stream and JPEG-encode it.
+
+    Optional alternative to the ONVIF snapshot. Note a fresh RTSP connect starts
+    at the NVR's last I-frame (main GOP=50 ≈ 2 s) and the open costs ~1.4 s, so
+    it is no fresher than the snapshot and writes a bigger file; kept for
+    cameras whose snapshot endpoint is unavailable or heavily cached. A
+    connection is opened per crossing, a frame is read, then it is closed.
+    Best-effort: returns None on any failure (the caller falls back to the
+    snapshot, then the substream frame).
+
+    Skipped when the substream needs the SHA-256 relay (`cfg.relay`); the
+    snapshot fallback covers those cameras.
+    """
+    url = cfg.capture_rtsp
+    if not url or cfg.relay:
+        return None
+    cap = None
+    try:
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if not cap.isOpened():
+            return None
+        deadline = time.time() + timeout
+        frame = None
+        while time.time() < deadline:
+            ok, f = cap.read()
+            if ok and f is not None and getattr(f, "size", 0):
+                frame = f
+                break
+        if frame is None:
+            return None
+        ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return jpg.tobytes() if ok else None
+    except Exception as e:
+        _log_throttled("capture_rtsp", f"[capture] main RTSP grab failed: {e}", every=60)
+        return None
+    finally:
+        if cap is not None:
+            cap.release()
+
+
+def fetch_capture_jpeg(cfg, timeout=6.0):
+    """Return a full-resolution main-profile JPEG, or None for the substream.
+
+    Mode `cfg.capture_main_mode`:
+      "rtsp" (default) — live main RTSP grab, falling back to the snapshot
+      "1"/"snap"       — the ONVIF main-profile snapshot
+      "0"/"sub"        — None (caller saves the substream crossing frame)
+    """
+    mode = cfg.capture_main_mode
+    if mode in ("0", "sub", "off", "false", "no"):
+        return None
+    if mode in ("rtsp", "live"):
+        jpeg = fetch_main_rtsp_jpeg(cfg, timeout=timeout)
+        if jpeg is not None:
+            return jpeg
+    return _fetch_snapshot_jpeg(cfg, timeout=timeout)
 
 
 _CAPTURE_SESSION = None
@@ -2249,14 +2337,15 @@ def persist_capture(cfg, capture_mgr, store, item, jpeg):
 def capture_loop(cfg, capture_mgr, store, capture_q):
     """Persist crossings on a worker thread (fetch/save off the track loop).
 
-    By default the full image is a full-resolution main-stream still and the
+    By default the full image is the camera's main-profile ONVIF snapshot and the
     thumbnail is always built from the substream frame captured at the crossing,
     so the timeline shows the vehicle at the line. It falls back to the substream
     frame for the full image too when the snapshot is stale (the worker was busy
     with earlier crossings) or unavailable — an accurately-timed low-res frame
     beats a crisp frame of the wrong moment. With `TRACKER_CAPTURE_MAIN_STREAM=0`
     the substream frame is saved as the full image and the camera's main encoder
-    is never exercised.
+    is never exercised; `=rtsp` decodes a main-stream frame instead of the
+    snapshot.
     """
     # Drain on shutdown too: `cfg.running` goes False before the main loop
     # exits, but anything already counted and queued must still be persisted so
@@ -2275,7 +2364,7 @@ def capture_loop(cfg, capture_mgr, store, capture_q):
                     if cfg.running and age <= CAPTURE_MAX_AGE else None)
             if jpeg is not None:
                 print(f"[capture] ID#{item['track_id']} main-stream ({len(jpeg) // 1024}KB)")
-            elif not CAPTURE_MAIN_STREAM:
+            elif cfg.capture_main_mode in ("0", "sub", "off", "false", "no"):
                 print(f"[capture] ID#{item['track_id']} substream (main-stream evidence off)")
             else:
                 why = "stale" if age > CAPTURE_MAX_AGE else "fallback"
