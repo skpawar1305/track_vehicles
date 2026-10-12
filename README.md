@@ -85,6 +85,15 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
   `keepout` in the camera config (`norm_keepout` in `config.json`) — additionally *freezes*
   the gate while the centroid is inside it; place it over a working excavator/loader that
   swings across the line. `tools/test_crossing.py` exercises all of the above.
+- **Zone-transition counting (instead of the line).** Draw an **Entry zone** and an **Exit
+  zone** in Camera setup and counting switches to `ZoneGate`: a track is committed to a zone
+  only while its centroid is `TRACKER_CROSS_MARGIN_FRAC` of the frame height *inside* it (the
+  gap between the zones is the hysteresis a bare point-in-polygon test lacks), and a
+  transition between the two committed zones counts once the centroid is `TRACKER_CONFIRM_FRAC`
+  inside the destination zone. Entry = IN, Exit = OUT (`IN side`/`flip_sides` swaps). A vehicle
+  must be seen in the other zone first, so a machine working inside one zone never counts and
+  the "appears already past the line" undercount disappears. The keep-out still applies.
+  `tools/test_zones.py` covers it; the line is the fallback when the zones aren't drawn.
 
 ## Layout
 

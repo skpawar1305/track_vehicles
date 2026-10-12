@@ -204,6 +204,13 @@ class Config:
         # from config.json; a remote config may also provide it.
         self.keepout = None       # legacy pixel coords
         self.norm_keepout = None  # normalized [[x,y],...] (0..1)
+        # Optional zone-transition counting (normalized polygons). When both are
+        # drawn, counting is a committed move between them (see ZoneGate) instead
+        # of a line crossing.
+        self.entry_zone = None
+        self.exit_zone = None
+        self.norm_entry_zone = None
+        self.norm_exit_zone = None
         # ncnn inference threads; also read from config.json so it can be lowered
         # on-device (heat/CPU) without editing the root-owned tracker.env.
         self.threads = int(os.environ.get("TRACKER_THREADS", str(NUM_THREADS)))
@@ -259,6 +266,10 @@ class Config:
                 self.norm_roi = data.get("norm_roi")
                 self.keepout = data.get("keepout")
                 self.norm_keepout = data.get("norm_keepout")
+                self.entry_zone = data.get("entry_zone")
+                self.exit_zone = data.get("exit_zone")
+                self.norm_entry_zone = data.get("norm_entry_zone")
+                self.norm_exit_zone = data.get("norm_exit_zone")
                 self.conf_thresh = data.get("conf_thresh", 0.5)
                 self.flip_sides = data.get("flip_sides", False)
                 self.capture_dir = os.environ.get(
@@ -305,6 +316,8 @@ class Config:
             data = {"stream_url": self.stream_url, "line": self.line, "roi": self.roi,
                     "norm_line": self.norm_line, "norm_roi": self.norm_roi,
                     "keepout": self.keepout, "norm_keepout": self.norm_keepout,
+                    "entry_zone": self.entry_zone, "exit_zone": self.exit_zone,
+                    "norm_entry_zone": self.norm_entry_zone, "norm_exit_zone": self.norm_exit_zone,
                     "conf_thresh": self.conf_thresh, "flip_sides": self.flip_sides,
                     "capture_dir": self.capture_dir, "max_captures": self.max_captures,
                     "enabled_classes": self.enabled_classes, "relay": self.relay,
@@ -352,6 +365,14 @@ class Config:
             if "keepout" in data:
                 self.norm_keepout = data["keepout"]
                 self.keepout = None
+            # Zone-transition counting: mirror the dashboard when both polygons
+            # are present in the payload (set or clear).
+            if "entry_zone" in data:
+                self.norm_entry_zone = data["entry_zone"]
+                self.entry_zone = None
+            if "exit_zone" in data:
+                self.norm_exit_zone = data["exit_zone"]
+                self.exit_zone = None
             self.flip_sides = bool(data.get("flip_sides", False))
             if data.get("enabled_classes"):
                 self.enabled_classes = _counting_classes(data["enabled_classes"])
@@ -376,6 +397,18 @@ class Config:
             if self.norm_keepout and len(self.norm_keepout) >= 3:
                 return [[int(p[0] * w), int(p[1] * h)] for p in self.norm_keepout]
             return self.keepout
+
+    def _pixel_zone(self, norm, legacy, w, h):
+        with self.lock:
+            if norm and len(norm) >= 3:
+                return [[int(p[0] * w), int(p[1] * h)] for p in norm]
+            return legacy
+
+    def pixel_entry_zone(self, w, h):
+        return self._pixel_zone(self.norm_entry_zone, self.entry_zone, w, h)
+
+    def pixel_exit_zone(self, w, h):
+        return self._pixel_zone(self.norm_exit_zone, self.exit_zone, w, h)
     def reset_counts(self):
         with self.lock: self.captures.clear()
         self.save()
@@ -563,6 +596,104 @@ class CrossingGate:
             return None
         d = ((obj.centroid[0] - lp[0]) ** 2 + (obj.centroid[1] - lp[1]) ** 2) ** 0.5
         return max(0.0, self.rearm_frac * frame_h - d)
+
+
+def inside_depth(poly, point):
+    """Signed distance (px) from ``point`` to the nearest edge of ``poly``:
+    positive inside, negative outside. ``None`` for a degenerate poly/point."""
+    if not poly or len(poly) < 3 or point is None:
+        return None
+    pts = np.asarray(poly, dtype=np.float32)
+    return float(cv2.pointPolygonTest(pts, (float(point[0]), float(point[1])), True))
+
+
+class ZoneGate:
+    """Directional counting by **zone transition** instead of a line crossing.
+
+    Two polygons — ``entry`` and ``exit`` — are drawn over the site. A track is
+    *committed* to a zone only while its centroid is at least ``margin_frac`` of
+    the frame height *inside* it; a centroid in neither zone (or in the gap
+    between them) keeps its previous commitment, which is the hysteresis that a
+    bare point-in-polygon test lacks. A transition between the two committed
+    zones counts once the centroid is ``confirm_frac`` of the frame height
+    inside the destination zone, the track is at least ``min_age`` frames old,
+    and it has re-armed since its last count. ``entry`` means IN, ``exit`` means
+    OUT (``flip`` swaps them).
+
+    So a machine working inside one zone never counts, and a vehicle must be
+    seen in the other zone before the transition — which also recovers the
+    crossing a vehicle that first appears already past a line would miss.
+    ``keepout`` freezes everything while the centroid is inside it.
+
+    Returns CROSSING_NONE, CROSSING_IN, CROSSING_OUT, or CROSSING_BLOCKED (same
+    codes as :class:`CrossingGate`).
+    """
+
+    def __init__(self, min_age=4, margin_frac=0.06, rearm_frac=0.2,
+                 confirm_frac=0.2, keepout=None):
+        self.min_age = min_age
+        self.margin_frac = margin_frac
+        self.rearm_frac = rearm_frac
+        self.confirm_frac = confirm_frac
+        self.keepout = keepout
+        self.zone = {}        # tid -> +1 committed to entry, -1 to exit
+        self.pending = {}     # tid -> target zone awaiting confirmation
+        self.last_pt = {}     # tid -> centroid where the last count committed
+
+    def drop(self, dead_ids):
+        for tid in dead_ids:
+            self.zone.pop(tid, None)
+            self.pending.pop(tid, None)
+            self.last_pt.pop(tid, None)
+
+    def update(self, entry, exit, obj, flip=False, frame_h=360):
+        if point_in_poly(self.keepout, obj.centroid):
+            return CROSSING_NONE
+        d_in = inside_depth(entry, obj.centroid)
+        d_out = inside_depth(exit, obj.centroid)
+        margin = self.margin_frac * frame_h
+        confirm = self.confirm_frac * frame_h if self.confirm_frac > 0 else margin
+        cand = None
+        if d_in is not None and d_in >= margin and (d_out is None or d_in >= d_out):
+            cand = 1
+        elif d_out is not None and d_out >= margin:
+            cand = -1
+        prev = self.zone.get(obj.track_id)
+        if cand is None:
+            # Between the zones / outside both: keep the commitment, cancel a
+            # pending that came back out without confirming.
+            self.pending.pop(obj.track_id, None)
+            return CROSSING_NONE
+        if prev is None:
+            # First sight inside a zone: commit without counting (no history).
+            self.zone[obj.track_id] = cand
+            return CROSSING_NONE
+        if cand == prev:
+            self.pending.pop(obj.track_id, None)
+            return CROSSING_NONE
+        # Candidate transition prev -> cand. Require the centroid to be well
+        # inside the destination zone before it counts.
+        depth = d_in if cand == 1 else d_out
+        if depth < confirm:
+            self.pending[obj.track_id] = cand
+            return CROSSING_NONE
+        if obj.age < self.min_age or self.rearm_remaining(obj, frame_h):
+            self.pending[obj.track_id] = cand
+            return CROSSING_BLOCKED
+        self.zone[obj.track_id] = cand
+        self.pending.pop(obj.track_id, None)
+        self.last_pt[obj.track_id] = (float(obj.centroid[0]), float(obj.centroid[1]))
+        if flip:
+            return CROSSING_OUT if cand == 1 else CROSSING_IN
+        return CROSSING_IN if cand == 1 else CROSSING_OUT
+
+    def rearm_remaining(self, obj, frame_h):
+        lp = self.last_pt.get(obj.track_id)
+        if lp is None:
+            return None
+        d = ((obj.centroid[0] - lp[0]) ** 2 + (obj.centroid[1] - lp[1]) ** 2) ** 0.5
+        return max(0.0, self.rearm_frac * frame_h - d)
+
 
 # ── Capture Manager ───────────────────────────────────────────────────
 class CaptureManager:
@@ -1742,19 +1873,27 @@ def draw_gate_overlay(img, line, objects, gate, frame_h, margin_px, scale=1.0):
 
 
 def annotate_live(frame, line, objects, counts, target_h=LIVE_HEIGHT, roi=None, flip=False,
-                  gate=None, margin_px=0.0, keepout=None):
+                  gate=None, margin_px=0.0, keepout=None, entry_zone=None, exit_zone=None):
     """Downscale to the target height and draw a crisp overlay (boxes scaled to match)."""
     h, w = frame.shape[:2]
     s = target_h / h if h > target_h else 1.0
     img = (cv2.resize(frame, (max(1, int(w * s)), target_h), interpolation=cv2.INTER_AREA)
            if s < 1.0 else frame.copy())
+    for poly, col, tag, ty in (
+            (entry_zone, (34, 197, 94), "IN", 0.06),
+            (exit_zone, (239, 68, 68), "OUT", 0.06)):
+        if poly is not None and len(poly) >= 3:
+            pts = np.array([[int(p[0] * s), int(p[1] * s)] for p in poly], dtype=np.int32)
+            cv2.polylines(img, [pts.reshape((-1, 1, 2))], True, col, 2, cv2.LINE_AA)
+            c = pts.mean(axis=0).astype(int)
+            cv2.putText(img, tag, tuple(c), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
     if keepout is not None and len(keepout) >= 3:
         pts = np.array([[int(p[0] * s), int(p[1] * s)] for p in keepout], dtype=np.int32)
         cv2.polylines(img, [pts.reshape((-1, 1, 2))], True, (60, 60, 220), 1, cv2.LINE_AA)
     if roi is not None and len(roi) >= 3:
         pts = np.array([[int(p[0] * s), int(p[1] * s)] for p in roi], dtype=np.int32)
         cv2.polylines(img, [pts.reshape((-1, 1, 2))], True, (100, 180, 255), 1, cv2.LINE_AA)
-    if line:
+    if line and not (entry_zone or exit_zone):
         x1, y1, x2, y2 = (int(v * s) for v in line)
         cv2.line(img, (x1, y1), (x2, y2), (59, 130, 246), 2)
         dx, dy = x2 - x1, y2 - y1
@@ -2097,6 +2236,12 @@ def main():
                                    margin_frac=cfg.cross_margin_frac,
                                    rearm_frac=cfg.cross_rearm_frac,
                                    confirm_frac=cfg.cross_confirm_frac)
+    # Used instead of cross_gate when both entry/exit zones are drawn.
+    zone_gate       = ZoneGate(min_age=cfg.min_track_age,
+                               margin_frac=cfg.cross_margin_frac,
+                               rearm_frac=cfg.cross_rearm_frac,
+                               confirm_frac=cfg.cross_confirm_frac)
+    zone_mode       = False   # set per frame when both zones are present
 
     latest = LatestFrame()
     shared = {"dets": [], "counter": 0, "lock": threading.Lock()}
@@ -2204,11 +2349,21 @@ def main():
             h, w = frame.shape[:2]
             line_px = cfg.pixel_line(w, h)
             roi_px  = cfg.pixel_roi(w, h)
-            # Refresh the gate's tunables/polygon each frame so a config change
+            entry_px = cfg.pixel_entry_zone(w, h)
+            exit_px  = cfg.pixel_exit_zone(w, h)
+            keepout_px = cfg.pixel_keepout(w, h)
+            # Zone-transition counting when both zones are drawn; a line crossing
+            # otherwise. Refresh tunables/polygons each frame so a config change
             # (or the frame size) is picked up without a restart.
-            cross_gate.keepout = cfg.pixel_keepout(w, h)
+            zone_mode = bool(entry_px and len(entry_px) >= 3
+                             and exit_px and len(exit_px) >= 3)
+            cross_gate.keepout = keepout_px
             cross_gate.confirm_frac = cfg.cross_confirm_frac
             cross_gate.rearm_frac = cfg.cross_rearm_frac
+            zone_gate.keepout = keepout_px
+            zone_gate.confirm_frac = cfg.cross_confirm_frac
+            zone_gate.rearm_frac = cfg.cross_rearm_frac
+            active_gate = zone_gate if zone_mode else cross_gate
 
             if fresh:
                 if prev_frame_t and now_t - prev_frame_t > 2.5:
@@ -2237,6 +2392,7 @@ def main():
                 present = {obj.track_id for obj in objects}
                 dead = gate_ids - present
                 cross_gate.drop(dead)
+                zone_gate.drop(dead)
                 gate_ids = present
 
             # Push annotated frame to the VPS live feed (~5 fps, non-blocking).
@@ -2249,9 +2405,10 @@ def main():
                 try:
                     ann = annotate_live(frame, line_px, objects, {"in": c_in, "out": c_out},
                                         roi=(roi_px if cfg.debug_overlay else None), flip=cfg.flip_sides,
-                                        gate=(cross_gate if cfg.debug_overlay else None),
+                                        gate=(active_gate if cfg.debug_overlay else None),
                                         margin_px=cfg.cross_margin_frac * h,
-                                        keepout=cross_gate.keepout)
+                                        keepout=keepout_px,
+                                        entry_zone=entry_px, exit_zone=exit_px)
                     ok, jpeg = cv2.imencode('.jpg', ann, [cv2.IMWRITE_JPEG_QUALITY, LIVE_QUALITY])
                     if ok:
                         try: live_q.put_nowait(jpeg.tobytes())
@@ -2269,8 +2426,8 @@ def main():
                 temp_c = _cpu_temp()
                 print(f"[stat] track={track_fps:.1f} fps  detect={detect_fps:.1f} fps  "
                       f"tracks={len(objects)}  temp={temp_c:.1f}C  "
-                      f"rearm_block={n_rearm_block} dedup_block={n_dedup_block} "
-                      f"pending={len(cross_gate.pending)}")
+                       f"rearm_block={n_rearm_block} dedup_block={n_dedup_block} "
+                       f"pending={len(active_gate.pending)}  mode={'zones' if zone_mode else 'line'}")
                 payload = {
                     "track_fps": round(float(track_fps), 1),
                     "detect_fps": round(float(detect_fps), 1),
@@ -2278,7 +2435,8 @@ def main():
                     "temp_c": None if temp_c != temp_c else round(float(temp_c), 1),
                     "in": int(c_in), "out": int(c_out),
                     "rearm_block": int(n_rearm_block), "dedup_block": int(n_dedup_block),
-                    "pending": int(len(cross_gate.pending)),
+                    "pending": int(len(active_gate.pending)),
+                    "mode": "zones" if zone_mode else "line",
                 }
                 _write_stats(payload)
                 if cfg.stats_url:
@@ -2296,11 +2454,14 @@ def main():
                         print(f"[dbg] #{obj.track_id} {obj.label} age={obj.age} "
                               f"c={obj.centroid} (wait)")
                     continue
-                crossing = cross_gate.update(line_px, obj, flip=cfg.flip_sides,
-                                             frame_h=h)
+                crossing = (zone_gate.update(entry_px, exit_px, obj, flip=cfg.flip_sides, frame_h=h)
+                            if zone_mode else
+                            cross_gate.update(line_px, obj, flip=cfg.flip_sides, frame_h=h))
                 if debug:
+                    side = (zone_gate.zone.get(obj.track_id) if zone_mode
+                            else cross_gate.side.get(obj.track_id))
                     print(f"[dbg] #{obj.track_id} {obj.label} age={obj.age} c={obj.centroid} "
-                          f"side={cross_gate.side.get(obj.track_id)} cross={crossing}")
+                          f"side={side} cross={crossing}")
                 if crossing == CROSSING_NONE:
                     continue
                 if crossing == CROSSING_BLOCKED:

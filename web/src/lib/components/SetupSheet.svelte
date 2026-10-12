@@ -4,26 +4,41 @@
   type Pt = [number, number];
   type Cfg = {
     line: Pt[] | null; roi: Pt[] | null; keepout: Pt[] | null;
+    entry_zone: Pt[] | null; exit_zone: Pt[] | null;
     flip_sides: boolean; enabled_classes: number[];
   };
 
-  let cfg = $state<Cfg>({ line: null, roi: null, keepout: null, flip_sides: false, enabled_classes: [2, 5, 7] });
-  let mode = $state<null | "line" | "area" | "keepout" | "in">(null);
+  let cfg = $state<Cfg>({
+    line: null, roi: null, keepout: null, entry_zone: null, exit_zone: null,
+    flip_sides: false, enabled_classes: [2, 5, 7],
+  });
+  let mode = $state<null | "line" | "area" | "keepout" | "entry" | "exit" | "in">(null);
   let dl = $state<Pt[]>([]);
   let da = $state<Pt[]>([]);
   let dk = $state<Pt[]>([]);
+  let de = $state<Pt[]>([]);
+  let dx = $state<Pt[]>([]);
   let msg = $state("");
   let snapSrc = $state("");
   let imgEl = $state<HTMLImageElement | undefined>();
   let editorEl = $state<HTMLDivElement | undefined>();
 
+  const pts = (poly: Pt[] | null) => (poly && poly.length >= 3 ? poly.map((p) => p.join(",")).join(" ") : "");
   let hasLine = $derived(!!(cfg.line && cfg.line.length === 2));
   let hasRoi = $derived(!!(cfg.roi && cfg.roi.length >= 3));
   let hasKeepout = $derived(!!(cfg.keepout && cfg.keepout.length >= 3));
-  let roiPoints = $derived(hasRoi ? cfg.roi!.map((p) => p.join(",")).join(" ") : "");
-  let keepoutPoints = $derived(hasKeepout ? cfg.keepout!.map((p) => p.join(",")).join(" ") : "");
-  let daPoints = $derived(da.map((p) => p.join(",")).join(" "));
-  let dkPoints = $derived(dk.map((p) => p.join(",")).join(" "));
+  let hasEntry = $derived(!!(cfg.entry_zone && cfg.entry_zone.length >= 3));
+  let hasExit = $derived(!!(cfg.exit_zone && cfg.exit_zone.length >= 3));
+  let hasZones = $derived(hasEntry && hasExit);
+  let roiPoints = $derived(pts(cfg.roi));
+  let keepoutPoints = $derived(pts(cfg.keepout));
+  let entryPoints = $derived(pts(cfg.entry_zone));
+  let exitPoints = $derived(pts(cfg.exit_zone));
+  let daPoints = $derived(pointsOf(da));
+  let dkPoints = $derived(pointsOf(dk));
+  let dePoints = $derived(pointsOf(de));
+  let dxPoints = $derived(pointsOf(dx));
+  function pointsOf(draft: Pt[]) { return draft.map((p) => p.join(",")).join(" "); }
   let ioPos = $derived.by(() => {
     if (!cfg.line || cfg.line.length !== 2) return { i: [0, 0] as Pt, o: [0, 0] as Pt };
     const A = cfg.line[0], B = cfg.line[1];
@@ -46,12 +61,7 @@
     const A = line[0], B = line[1];
     return (B[0] - A[0]) * (p[1] - A[1]) - (B[1] - A[1]) * (p[0] - A[0]);
   }
-
-  function setMode(m: typeof mode) {
-    mode = m;
-  }
-
-  // A tap closes the current polygon if it lands near its first point.
+  function setMode(m: typeof mode) { mode = m; }
   function nearFirst(draft: Pt[], p: Pt) {
     return draft.length >= 3 && Math.hypot(p[0] - draft[0][0], p[1] - draft[0][1]) < 0.05;
   }
@@ -64,11 +74,13 @@
       dl = [...dl, p];
       if (dl.length === 2) { cfg.line = dl.slice(); dl = []; mode = null; }
     } else if (mode === "area") {
-      if (nearFirst(da, p)) { cfg.roi = da.slice(); da = []; mode = null; }
-      else da = [...da, p];
+      if (nearFirst(da, p)) { cfg.roi = da.slice(); da = []; mode = null; } else da = [...da, p];
     } else if (mode === "keepout") {
-      if (nearFirst(dk, p)) { cfg.keepout = dk.slice(); dk = []; mode = null; }
-      else dk = [...dk, p];
+      if (nearFirst(dk, p)) { cfg.keepout = dk.slice(); dk = []; mode = null; } else dk = [...dk, p];
+    } else if (mode === "entry") {
+      if (nearFirst(de, p)) { cfg.entry_zone = de.slice(); de = []; mode = null; } else de = [...de, p];
+    } else if (mode === "exit") {
+      if (nearFirst(dx, p)) { cfg.exit_zone = dx.slice(); dx = []; mode = null; } else dx = [...dx, p];
     } else if (mode === "in" && cfg.line) {
       cfg.flip_sides = side(cfg.line, p) < 0; mode = null;
     }
@@ -76,19 +88,23 @@
 
   function reset() {
     cfg.line = null; cfg.roi = null; cfg.keepout = null;
-    dl = []; da = []; dk = []; mode = null;
+    cfg.entry_zone = null; cfg.exit_zone = null;
+    dl = []; da = []; dk = []; de = []; dx = []; mode = null;
   }
 
   async function save() {
     if (da.length >= 3) { cfg.roi = da.slice(); da = []; mode = null; }
     if (dk.length >= 3) { cfg.keepout = dk.slice(); dk = []; mode = null; }
+    if (de.length >= 3) { cfg.entry_zone = de.slice(); de = []; mode = null; }
+    if (dx.length >= 3) { cfg.exit_zone = dx.slice(); dx = []; mode = null; }
     msg = "saving…";
     try {
       const r = await fetch("/api/config", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          line: cfg.line, roi: cfg.roi, keepout: cfg.keepout, flip_sides: cfg.flip_sides,
-          enabled_classes: cfg.enabled_classes,
+          line: cfg.line, roi: cfg.roi, keepout: cfg.keepout,
+          entry_zone: cfg.entry_zone, exit_zone: cfg.exit_zone,
+          flip_sides: cfg.flip_sides, enabled_classes: cfg.enabled_classes,
           source_w: imgEl?.naturalWidth, source_h: imgEl?.naturalHeight,
         }),
       });
@@ -105,10 +121,18 @@
       <img bind:this={imgEl} src={snapSrc} alt="snapshot">
       <svg viewBox="0 0 1 1" preserveAspectRatio="none">
         {#if hasRoi}
-          <polygon points={roiPoints} fill="rgba(100,180,255,.15)" stroke="#64b4ff" stroke-width="2" vector-effect="non-scaling-stroke" />
+          <polygon points={roiPoints} fill="rgba(100,180,255,.12)" stroke="#64b4ff" stroke-width="2" vector-effect="non-scaling-stroke" />
+        {/if}
+        {#if hasEntry}
+          <polygon points={entryPoints} fill="rgba(34,197,94,.15)" stroke="#22c55e" stroke-width="2" vector-effect="non-scaling-stroke" />
+          <text x="0.02" y="0.12" fill="#16a34a" font-size="0.05" font-weight="700" text-anchor="start">ENTRY / IN</text>
+        {/if}
+        {#if hasExit}
+          <polygon points={exitPoints} fill="rgba(239,68,68,.15)" stroke="#ef4444" stroke-width="2" vector-effect="non-scaling-stroke" />
+          <text x="0.02" y="0.20" fill="#dc2626" font-size="0.05" font-weight="700" text-anchor="start">EXIT / OUT</text>
         {/if}
         {#if hasKeepout}
-          <polygon points={keepoutPoints} fill="rgba(239,68,68,.15)" stroke="#ef4444" stroke-width="2" stroke-dasharray="5" vector-effect="non-scaling-stroke" />
+          <polygon points={keepoutPoints} fill="rgba(239,68,68,.10)" stroke="#ef4444" stroke-width="2" stroke-dasharray="5" vector-effect="non-scaling-stroke" />
         {/if}
         {#if da.length >= 2}
           <polyline points={daPoints} fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="4" vector-effect="non-scaling-stroke" />
@@ -116,7 +140,13 @@
         {#if dk.length >= 2}
           <polyline points={dkPoints} fill="none" stroke="#ef4444" stroke-width="2" stroke-dasharray="4" vector-effect="non-scaling-stroke" />
         {/if}
-        {#if hasLine}
+        {#if de.length >= 2}
+          <polyline points={dePoints} fill="none" stroke="#22c55e" stroke-width="2" stroke-dasharray="4" vector-effect="non-scaling-stroke" />
+        {/if}
+        {#if dx.length >= 2}
+          <polyline points={dxPoints} fill="none" stroke="#ef4444" stroke-width="2" stroke-dasharray="4" vector-effect="non-scaling-stroke" />
+        {/if}
+        {#if hasLine && !hasZones}
           <line x1={cfg.line![0][0]} y1={cfg.line![0][1]} x2={cfg.line![1][0]} y2={cfg.line![1][1]} stroke="#3b82f6" stroke-width="3" vector-effect="non-scaling-stroke" />
           <text x={ioPos.i[0]} y={ioPos.i[1]} fill="#16a34a" font-size="0.05" font-weight="700" text-anchor="middle">IN</text>
           <text x={ioPos.o[0]} y={ioPos.o[1]} fill="#dc2626" font-size="0.05" font-weight="700" text-anchor="middle">OUT</text>
@@ -127,17 +157,35 @@
         {#each dk as p}
           <circle cx={p[0]} cy={p[1]} r="0.008" fill="#ef4444" vector-effect="non-scaling-stroke" />
         {/each}
+        {#each de as p}
+          <circle cx={p[0]} cy={p[1]} r="0.008" fill="#22c55e" vector-effect="non-scaling-stroke" />
+        {/each}
+        {#each dx as p}
+          <circle cx={p[0]} cy={p[1]} r="0.008" fill="#ef4444" vector-effect="non-scaling-stroke" />
+        {/each}
       </svg>
     </div>
     <div class="tools">
       <button class:active={mode === "line"} onclick={() => { dl = []; setMode("line"); }}>Line</button>
       <button class:active={mode === "area"} onclick={() => setMode("area")}>Area</button>
+      <button class="zone-in" class:active={mode === "entry"} onclick={() => { de = []; setMode("entry"); }}>Entry zone</button>
+      <button class="zone-out" class:active={mode === "exit"} onclick={() => { dx = []; setMode("exit"); }}>Exit zone</button>
       <button class:active={mode === "keepout"} onclick={() => { dk = []; setMode("keepout"); }}>Keep-out</button>
       <button class:active={mode === "in"} onclick={() => setMode("in")}>IN side</button>
       <button onclick={reset}>Reset</button>
       <button class="primary" onclick={save}>Save</button>
       <span class="msg">{msg}</span>
     </div>
-    <p class="hint">Line: tap 2 points. Area: tap points, tap the first point (or Save) to close. Keep-out: the same, for the working machine's zone — crossings freeze there. IN side: tap where traffic enters. Then Save.</p>
+    <p class="hint">
+      Draw <b>Entry zone</b> and <b>Exit zone</b> to count by zone transition: a vehicle is
+      counted when it moves from one committed zone into the other (Entry = IN, Exit = OUT;
+      use IN side to swap). Counting then ignores the line. Keep-out freezes counting inside it.
+      Tap points, tap the first point (or Save) to close a polygon.
+    </p>
   </div>
 {/if}
+
+<style>
+  .tools button.zone-in.active { background: #16a34a; color: #fff; border-color: #16a34a; }
+  .tools button.zone-out.active { background: #dc2626; color: #fff; border-color: #dc2626; }
+</style>
