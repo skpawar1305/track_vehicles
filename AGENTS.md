@@ -49,7 +49,8 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   config/live/prune/snapshot failures are diagnosable.
 
 ## Project
-- Edge vehicle line-counter: RTSP -> detector (YOLO26n INT8 via ncnn) -> centroid
+- Edge vehicle line-counter: RTSP -> detector (ncnn; **production runs NanoDet-Plus
+  fp32**, code default is YOLO26n INT8 via `hybrid`) -> centroid
   tracker -> crossing gate -> offline SQLite -> HTTPS sync to a Bun/VPS dashboard.
 - Edge runs on a Raspberry Pi 5 (DietPi); input is a CCTV camera's H.264 substream
   (ONVIF path `.../Streaming/Channels/102`, 640x360). The camera's RTSP Digest is
@@ -325,11 +326,14 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   cuts the live preview to ~9 fps. Select it without root via
   `config.json` `{"model":"yolo26n","model_imgsz":"640x640","int8":true}` (the model
   dir must exist); revert `model_imgsz` to `320x320` to go back.
-- **The current detector is the best-performing one — keep it.** Production runs
-  `"detector": "hybrid"` (motion-gated) with `"model": "yolo26n"`,
-  `"model_imgsz": "320x320"`, `"int8": true`, `"threads": 2`; measured ~24 `detect_fps`
-  at ~71 °C on the Pi 5 substream. The alternatives (`motion`, `nanodet`, `opencv`) and
-  640×640 all performed worse here, so do not switch without a measured win.
+- **Current production detector: NanoDet-Plus fp32 — the site's chosen best.** Set via
+  `/opt/tracker/config.json` → `"detector": "nanodet"`, `"dnn_model":
+  "/opt/tracker/models/nanodet_plus_m_1.5x_416.ncnn.param"` (fp32 ncnn graph, 416 input,
+  COCO 80 classes, container suppression in `NanoDetNcnn`). Measured ~15 `detect_fps` at
+  ~75 °C on the Pi 5 substream. The **code default is `hybrid`** (motion-gated YOLO26n
+  INT8 `320x320`), and `opencv` is the ONNX `cv2.dnn` NanoDet variant (~12 fps) — switch
+  `detector`/`dnn_model` in `config.json` to change without editing the root-owned
+  `tracker.env`.
 - `ncnn`'s wheel declares the GUI `opencv-python` (needs libxcb); first-boot.sh replaces
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads

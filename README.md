@@ -1,7 +1,8 @@
 # Vehicle Line Counter
 
-RTSP vehicle counting with line-crossing detection. Inference is **YOLO26n INT8** via
-**ncnn** (ARM-optimised), tracking is a **two-tier velocity tracker** (IoU primary,
+RTSP vehicle counting with line-crossing detection. Inference is **ncnn**
+(ARM-optimised): production runs **NanoDet-Plus fp32**, code default **YOLO26n INT8**
+(`hybrid`); tracking is a **two-tier velocity tracker** (IoU primary,
 centroid-distance fallback), the edge store is **offline-first SQLite**, and the dashboard
 is **Bun + Drizzle + SQLite** on a VPS.
 
@@ -9,7 +10,7 @@ is **Bun + Drizzle + SQLite** on a VPS.
 ┌──────────────── Pi 5 (DietPi, behind NAT) ─────────────────────────┐
 │ CCTV substream 640x360 H.264 (RtspRelay: SHA-256 Digest)           │
 │   reader thread ─▶ newest frame                                    │
-│   detect thread ─▶ motion latch + YOLO26n INT8 (ncnn)             │
+│   detect thread ─▶ NanoDet-Plus fp32 / YOLO26n INT8 (ncnn)        │
 │   tracking loop ─▶ IoU tracker @ camera rate + crossing gate       │
 │   captures → JPEG + SQLite (offline) ; sync worker → HTTPS POST   │
 │   terminal agent ─▶ outbound WSS → dashboard /terminal (PTY shell)│
@@ -106,7 +107,8 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/set_encoder.py` | Read/set a camera's ONVIF encoder (resolution/bitrate/GOP/fps/quality); dry-run by default |
 | `web/` | SvelteKit (static SPA) dashboard + Bun ingest/reverse-terminal API (Drizzle + SQLite) |
 | `deploy/` | systemd units + env examples for the Pi |
-| `models/yolo26n_ncnn_320x320/` | Production model (fp32 + INT8), ROI-matched input; INT8 calibrated on dumpers |
+| `models/nanodet_plus_m_1.5x_416.ncnn.*` | **Current production detector** — NanoDet-Plus fp32, 416 input, COCO 80 classes |
+| `models/yolo26n_ncnn_320x320/` | YOLO26n ncnn (fp32 + INT8), the `hybrid` code-default model; INT8 calibrated on dumpers |
 | `calib/dumper_trucks/` | INT8 calibration images (dump trucks / tippers / haulers) for the production model |
 
 ## Pi quick start (DietPi 64-bit)
@@ -347,11 +349,11 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
 `256x256` ≈ 46 (smaller = faster, lower confidence). `run.py` logs
 `[stat] track=<fps> detect=<fps> tracks=<n>` every 10 s so the split is visible on-device.
 
-**Current production detector = `hybrid` (motion-gated) → `HybridDetector`/`YoloNcnn`
-with the YOLO26n INT8 `320x320` model (2 threads).** This is the best-performing
-configuration measured on the Pi 5 (~24 `detect_fps` at ~71 °C); the other detectors
-(`motion`, `nanodet`, `opencv`) and `640x640` all did worse here, so don't switch
-without a measured win.
+**Current production detector = `nanodet` → `NanoDetNcnn` with the NanoDet-Plus fp32
+`416` model (`models/nanodet_plus_m_1.5x_416.ncnn`).** Selected in `config.json`
+(`"detector": "nanodet"`); measured ~15 `detect_fps` on the Pi 5. The code default is
+`hybrid` (motion-gated YOLO26n INT8 `320x320`), and `opencv` is the ONNX `cv2.dnn`
+NanoDet variant (~12 fps).
 
 ## Gotchas
 

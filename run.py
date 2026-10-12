@@ -2275,6 +2275,8 @@ def main():
                     "track_fps": round(float(track_fps), 1),
                     "detect_fps": round(float(detect_fps), 1),
                     "tracks": int(len(objects)),
+                    "detector": type(detector).__name__,
+                    "dets": int(len(shared.get("dets") or [])),
                     "temp_c": None if temp_c != temp_c else round(float(temp_c), 1),
                     "in": int(c_in), "out": int(c_out),
                     "rearm_block": int(n_rearm_block), "dedup_block": int(n_dedup_block),
