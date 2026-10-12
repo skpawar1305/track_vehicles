@@ -49,8 +49,8 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   config/live/prune/snapshot failures are diagnosable.
 
 ## Project
-- Edge vehicle line-counter: RTSP -> detector (ncnn; **production runs NanoDet-Plus
-  fp32**, code default is YOLO26n INT8 via `hybrid`) -> centroid
+- Edge vehicle line-counter: RTSP -> detector (ncnn; **production runs PP-PicoDet-S
+  @320**, code default is YOLO26n INT8 via `hybrid`) -> centroid
   tracker -> crossing gate -> offline SQLite -> HTTPS sync to a Bun/VPS dashboard.
 - Edge runs on a Raspberry Pi 5 (DietPi); input is a CCTV camera's H.264 substream
   (ONVIF path `.../Streaming/Channels/102`, 640x360). The camera's RTSP Digest is
@@ -326,19 +326,24 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   cuts the live preview to ~9 fps. Select it without root via
   `config.json` `{"model":"yolo26n","model_imgsz":"640x640","int8":true}` (the model
   dir must exist); revert `model_imgsz` to `320x320` to go back.
-- **Current production detector: NanoDet-Plus-m @416 (ncnn, fp16).** Set via
-  `/opt/tracker/config.json` → `"detector": "nanodet"`, `"dnn_model":
-  "/opt/tracker/models/nanodet_plus_m_416.ncnn.param"` (RangiLyu's official
-  `nanodet-plus-m_416_ncnn.zip`: 1.52 GFLOPs, 30.4 mAP, COCO 80 classes, container
-  suppression in `NanoDetNcnn`). Measured ~19 `detect_fps` at ~74 °C on the Pi 5
-  substream (the heavier 1.5x-416 — 2.97 GFLOPs / 34.1 mAP — was ~15). `NanoDetNcnn`
-  reads the input/output blob names from the `.param` (`data`/`output` for the official
-  export, `in0`/`out0` for the older one). The **code default is `hybrid`** (motion-gated
-  YOLO26n INT8 `320x320`), and `opencv` is the ONNX `cv2.dnn` variant (~12 fps) — switch
-  `detector`/`dnn_model` in `config.json` to change without editing `tracker.env`.
-  A/B over 97 real crossing frames (2026-10-12): Plus-m@416 found **97/97** (94 truck) vs
-  Plus-m@320 88/97 (64 truck) vs YOLO26n INT8@320 73/97 (72) — resolution beats FPS here,
-  so keep @416.
+- **Current production detector: PP-PicoDet-S @320 (ncnn).** Set via
+  `/opt/tracker/config.json` → `"detector": "picodet"`, `"dnn_model":
+  "/opt/tracker/models/picodet_s_320.ncnn.param"`, `"dnn_imgsz": "320"` (Qengineering's
+  `picodet_s_320_coco_lcnet` ncnn export: 0.99M params / ~0.9 GFLOPs, COCO 80 classes).
+  `PicodetNcnn` decodes the FCOS/GFL head — per level (strides 8/16/32/64) a class-score
+  map `transpose_<2k>.tmp_0` and a bbox-distance distribution `transpose_<2k+1>.tmp_0`
+  (4×(reg_max+1)=32) via softmax-expectation over the bins. Preprocess is a **plain stretch**
+  to 320² (`ncnn.Mat.from_pixels_resize`, BGR, mean [103.53,116.28,123.675], norm
+  1/[57.375,57.12,58.395]); the ROI slice must be `np.ascontiguousarray`'d or
+  `from_pixels_resize` reads garbage. Class-agnostic NMS (`nms_thresh` 0.6). Measured ~21
+  `detect_fps` at ~71 °C on the Pi 5 (NanoDet-Plus-m@416 was ~20 fps / 76 °C at equal
+  recall). A/B over 97 real crossing frames (2026-10-12): PicoDet-S@320 **97/97** (93 truck)
+  ≈ NanoDet-Plus-m@416 97/97 (94) and ≫ YOLO26n INT8@320 74/97 (73); on the saved truck
+  frame PicoDet was more confident (0.89/0.75 vs 0.58/0.57). Alternatives: `"detector":
+  "nanodet"` (RangiLyu NanoDet-Plus; `dnn_model`=…`nanodet_plus_m_416.ncnn.param`,
+  `dnn_imgsz` 416; the 1.5x-416 was ~15 fps) and the code default `hybrid` (motion-gated
+  YOLO26n INT8 `320x320`) — switch `detector`/`dnn_model`/`dnn_imgsz` in `config.json`
+  without editing the root-owned `tracker.env`.
 - `ncnn`'s wheel declares the GUI `opencv-python` (needs libxcb); first-boot.sh replaces
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads

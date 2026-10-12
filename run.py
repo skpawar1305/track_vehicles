@@ -212,6 +212,9 @@ class Config:
         self.model = YOLO_MODEL
         self.model_imgsz = YOLO_IMGSZ
         self.int8 = YOLO_INT8
+        # Square input of the `nanodet`/`picodet` ncnn graph (must match its
+        # export). Independent of the YOLO model_imgsz above.
+        self.dnn_imgsz = os.environ.get("TRACKER_DNN_IMGSZ", "416")
         # Debug overlay (hysteresis band + per-track re-arm state) on the live feed.
         self.debug_overlay = os.environ.get("TRACKER_DEBUG_OVERLAY", "0") == "1"
         self.running = True
@@ -276,6 +279,7 @@ class Config:
                 self.model = data.get("model", self.model)
                 self.model_imgsz = data.get("model_imgsz", self.model_imgsz)
                 self.int8 = bool(data.get("int8", self.int8))
+                self.dnn_imgsz = data.get("dnn_imgsz", self.dnn_imgsz)
                 self.detector = data.get("detector", self.detector)
                 self.dnn_model = data.get("dnn_model", self.dnn_model)
                 self.cam2_url = data.get("cam2_url", self.cam2_url)
@@ -315,6 +319,7 @@ class Config:
                     "model": self.model,
                     "model_imgsz": self.model_imgsz,
                     "int8": self.int8,
+                    "dnn_imgsz": self.dnn_imgsz,
                     "detector": self.detector,
                     "dnn_model": self.dnn_model,
                     "cam2_url": self.cam2_url, "capture_url": self.capture_url}
@@ -660,9 +665,12 @@ def _ncnn_io_names(param_path):
 
 class NanoDetNcnn:
     def __init__(self, model_param=MODEL_PARAM, model_bin=None, conf_thresh=0.5,
-                 iou_thresh=0.45, num_threads=NUM_THREADS):
+                 iou_thresh=0.45, num_threads=NUM_THREADS, input_size=_INPUT_SIZE):
         self.conf_thresh = conf_thresh
         self.iou_thresh  = iou_thresh
+        # Square network input the priors decode against (320 or 416); must match
+        # the ncnn graph's export size.
+        self.input_size  = int(input_size)
         # Containment suppression: drop a box that mostly sits inside a
         # higher-confidence one (NanoDet emits "container"/fragment boxes that
         # IoU-NMS misses because their IoU is low).
@@ -678,8 +686,8 @@ class NanoDetNcnn:
         self.input_name, self.output_name = _ncnn_io_names(model_param)
         priors = []
         for stride in _STRIDES:
-            h = int(np.ceil(_INPUT_SIZE / stride))
-            w = int(np.ceil(_INPUT_SIZE / stride))
+            h = int(np.ceil(self.input_size / stride))
+            w = int(np.ceil(self.input_size / stride))
             for i in range(h):
                 for j in range(w):
                     priors.append((j * stride, i * stride, stride))
@@ -687,12 +695,13 @@ class NanoDetNcnn:
 
     def _preprocess(self, frame):
         h, w = frame.shape[:2]
-        scale = min(_INPUT_SIZE / h, _INPUT_SIZE / w)
+        s = self.input_size
+        scale = min(s / h, s / w)
         new_h, new_w = int(h * scale), int(w * scale)
-        pad_h = (_INPUT_SIZE - new_h) // 2
-        pad_w = (_INPUT_SIZE - new_w) // 2
+        pad_h = (s - new_h) // 2
+        pad_w = (s - new_w) // 2
         resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        canvas = np.full((_INPUT_SIZE, _INPUT_SIZE, 3), 114, dtype=np.uint8)
+        canvas = np.full((s, s, 3), 114, dtype=np.uint8)
         canvas[pad_h:pad_h + new_h, pad_w:pad_w + new_w] = resized
         blob = canvas.astype(np.float32)
         blob = (blob - _MEAN) / _STD
@@ -809,6 +818,126 @@ class NanoDetNcnn:
         cx2, cy2 = int(min(w, pts[:, 0].max())), int(min(h, pts[:, 1].max()))
         if cx2 <= cx1 or cy2 <= cy1: return []
         return self._run_on_roi(frame[cy1:cy2, cx1:cx2], enabled_classes, cx1, cy1)
+
+
+# ── PP-PicoDet (PaddleDetection) ncnn Detector ────────────────────────
+# FCOS/GFL head: per level a class-score map (num_class) and a bbox-distance
+# distribution (4*(reg_max+1)), decoded by a softmax expectation over the bins.
+# Uses Qengineering's ncnn export (`picodet_s_320_coco_lcnet`): input ``image``,
+# outputs ``transpose_<2k>.tmp_0`` (cls) and ``transpose_<2k+1>.tmp_0`` (dis),
+# for strides 8/16/32/64.
+_PICO_MEAN = [103.53, 116.28, 123.675]
+_PICO_NORM = [0.017429, 0.017507, 0.017125]
+_PICO_HEADS = [(0, 1, 8), (2, 3, 16), (4, 5, 32), (6, 7, 64)]
+
+
+class PicodetNcnn:
+    def __init__(self, model_param, model_bin=None, conf_thresh=0.3,
+                 nms_thresh=0.6, num_threads=NUM_THREADS, input_size=320,
+                 reg_max=7, num_class=80):
+        if model_bin is None:
+            model_bin = model_param[:-6] + ".bin"
+        self.conf_thresh = float(conf_thresh)
+        self.nms_thresh  = float(nms_thresh)
+        self.input_size  = int(input_size)
+        self.reg_max     = int(reg_max)
+        self.num_class   = int(num_class)
+        self.net = ncnn.Net()
+        self.net.opt.num_threads = num_threads
+        self.net.load_param(model_param)
+        self.net.load_model(model_bin)
+        self.bins = np.arange(self.reg_max + 1, dtype=np.float32)
+
+    def _nms(self, boxes, scores):
+        # Class-agnostic NMS (boxes are indexed by anchor; labels are separate),
+        # so one vehicle's car+truck duplicates collapse like NanoDet's.
+        if not boxes:
+            return []
+        b = np.asarray(boxes, dtype=np.float32)
+        sc = np.asarray(scores, dtype=np.float32)
+        area = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
+        order = sc.argsort()[::-1]
+        keep = []
+        while order.size:
+            i = order[0]
+            keep.append(int(i))
+            xx1 = np.maximum(b[i, 0], b[order[1:], 0])
+            yy1 = np.maximum(b[i, 1], b[order[1:], 1])
+            xx2 = np.minimum(b[i, 2], b[order[1:], 2])
+            yy2 = np.minimum(b[i, 3], b[order[1:], 3])
+            inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
+            iou = inter / (area[i] + area[order[1:]] - inter + 1e-9)
+            order = order[np.where(iou <= self.nms_thresh)[0] + 1]
+        return keep
+
+    def _run(self, frame, enabled_classes, ox, oy):
+        h, w = frame.shape[:2]
+        s = self.input_size
+        img = np.ascontiguousarray(frame)   # ROI slices are non-contiguous views
+        mat = ncnn.Mat.from_pixels_resize(img, ncnn.Mat.PixelType.PIXEL_BGR,
+                                          w, h, s, s)
+        mat.substract_mean_normalize(_PICO_MEAN, _PICO_NORM)
+        ex = self.net.create_extractor()
+        ex.input("image", mat)
+        boxes, scores, labels = [], [], []
+        sx, sy = w / s, h / s
+        for ci, di, stride in _PICO_HEADS:
+            cls = np.array(ex.extract(f"transpose_{ci}.tmp_0")[1], dtype=np.float32)
+            dis = np.array(ex.extract(f"transpose_{di}.tmp_0")[1], dtype=np.float32)
+            cls = cls.reshape(-1, self.num_class)
+            dis = dis.reshape(-1, 4 * (self.reg_max + 1))
+            fw = int(np.ceil(s / stride))
+            lab = cls.argmax(axis=1)
+            sc = cls[np.arange(cls.shape[0]), lab]
+            idx = np.nonzero(sc > self.conf_thresh)[0]
+            if not idx.size:
+                continue
+            d = dis[idx].reshape(-1, 4, self.reg_max + 1)
+            e = np.exp(d - d.max(axis=2, keepdims=True))
+            sm = e / e.sum(axis=2, keepdims=True)
+            dist = (sm * self.bins).sum(axis=2) * stride
+            cx = (idx % fw + 0.5) * stride
+            cy = (idx // fw + 0.5) * stride
+            x1 = np.clip(cx - dist[:, 0], 0, s)
+            y1 = np.clip(cy - dist[:, 1], 0, s)
+            x2 = np.clip(cx + dist[:, 2], 0, s)
+            y2 = np.clip(cy + dist[:, 3], 0, s)
+            sc = sc[idx]
+            lab = lab[idx]
+            for k in range(idx.shape[0]):
+                cid = int(lab[k])
+                if cid in EXCLUDED_TWO_WHEELER_CLASSES:
+                    continue
+                if enabled_classes and cid not in enabled_classes:
+                    continue
+                boxes.append((x1[k] * sx + ox, y1[k] * sy + oy,
+                              x2[k] * sx + ox, y2[k] * sy + oy))
+                scores.append(float(sc[k]))
+                labels.append(cid)
+        out = []
+        for k in self._nms(boxes, scores):
+            bx1, by1, bx2, by2 = (int(boxes[k][0]), int(boxes[k][1]),
+                                  int(boxes[k][2]), int(boxes[k][3]))
+            cid = labels[k]
+            out.append({'bbox': (bx1, by1, bx2, by2),
+                        'centroid': ((bx1 + bx2) // 2, (by1 + by2) // 2),
+                        'confidence': scores[k], 'class_id': cid,
+                        'label': _VEHICLE_NAMES.get(cid, f'cls_{cid}')})
+        return out
+
+    def detect(self, frame, enabled_classes=None):
+        return self._run(frame, enabled_classes, 0, 0)
+
+    def detect_roi(self, frame, roi_points, enabled_classes=None):
+        if roi_points is None or len(roi_points) < 3:
+            return self.detect(frame, enabled_classes)
+        h, w = frame.shape[:2]
+        pts = np.array(roi_points, dtype=np.int32)
+        cx1, cy1 = int(max(0, pts[:, 0].min())), int(max(0, pts[:, 1].min()))
+        cx2, cy2 = int(min(w, pts[:, 0].max())), int(min(h, pts[:, 1].max()))
+        if cx2 <= cx1 or cy2 <= cy1:
+            return []
+        return self._run(frame[cy1:cy2, cx1:cx2], enabled_classes, cx1, cy1)
 
 
 class CvDnnNanoDet:
@@ -2087,8 +2216,14 @@ def main():
         print(f"[main] OpenCV DNN NanoDet-Plus ({cfg.dnn_model}, {cfg.threads} threads)")
     elif cfg.detector == "nanodet":
         detector    = NanoDetNcnn(model_param=cfg.dnn_model,
-                                   conf_thresh=cfg.conf_thresh, num_threads=cfg.threads)
-        print(f"[main] NanoDet-Plus ncnn ({cfg.dnn_model}, {cfg.threads} threads)")
+                                   conf_thresh=cfg.conf_thresh, num_threads=cfg.threads,
+                                   input_size=_parse_imgsz(cfg.dnn_imgsz)[0])
+        print(f"[main] NanoDet-Plus ncnn ({cfg.dnn_model}, {cfg.dnn_imgsz}, {cfg.threads} threads)")
+    elif cfg.detector == "picodet":
+        detector    = PicodetNcnn(model_param=cfg.dnn_model,
+                                   conf_thresh=cfg.conf_thresh, num_threads=cfg.threads,
+                                   input_size=_parse_imgsz(cfg.dnn_imgsz)[0])
+        print(f"[main] PP-PicoDet ncnn ({cfg.dnn_model}, {cfg.dnn_imgsz}, {cfg.threads} threads)")
     else:
         detector    = HybridDetector(conf_thresh=cfg.conf_thresh,
                                      motion_scale=cfg.motion_scale,

@@ -1,7 +1,7 @@
 # Vehicle Line Counter
 
 RTSP vehicle counting with line-crossing detection. Inference is **ncnn**
-(ARM-optimised): production runs **NanoDet-Plus fp32**, code default **YOLO26n INT8**
+(ARM-optimised): production runs **PP-PicoDet-S @320**, code default **YOLO26n INT8**
 (`hybrid`); tracking is a **two-tier velocity tracker** (IoU primary,
 centroid-distance fallback), the edge store is **offline-first SQLite**, and the dashboard
 is **Bun + Drizzle + SQLite** on a VPS.
@@ -107,7 +107,8 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/set_encoder.py` | Read/set a camera's ONVIF encoder (resolution/bitrate/GOP/fps/quality); dry-run by default |
 | `web/` | SvelteKit (static SPA) dashboard + Bun ingest/reverse-terminal API (Drizzle + SQLite) |
 | `deploy/` | systemd units + env examples for the Pi |
-| `models/nanodet_plus_m_416.ncnn.*` | **Current production detector** — NanoDet-Plus-m fp16, 416 input, COCO 80 classes (RangiLyu release) |
+| `models/picodet_s_320.ncnn.*` | **Current production detector** — PP-PicoDet-S, 320 input, COCO 80 classes (Qengineering) |
+| `models/nanodet_plus_m_416.ncnn.*` | NanoDet-Plus-m fp16, 416 input, COCO 80 classes (RangiLyu) — `nanodet` alternative |
 | `models/yolo26n_ncnn_320x320/` | YOLO26n ncnn (fp32 + INT8), the `hybrid` code-default model; INT8 calibrated on dumpers |
 | `calib/dumper_trucks/` | INT8 calibration images (dump trucks / tippers / haulers) for the production model |
 
@@ -152,7 +153,7 @@ See `deploy/tracker.env.example`. Key knobs:
 | `TRACKER_MODEL` | `yolo26n` | Model family (`models/<name>_ncnn_<imgsz>/`) — also `"model"` in `config.json` |
 | `TRACKER_MODEL_IMGSZ` | `320x320` | Model input `HxW`, matched to the ROI aspect — also `"model_imgsz"` in `config.json` |
 | `TRACKER_INT8` | `1` | Use `model_int8.ncnn.param` — also `"int8"` in `config.json` |
-| `TRACKER_DETECTOR` | `hybrid` | `hybrid` (motion-gated YOLO) · `motion` · `yolo` · `nanodet` (ncnn) · `opencv` (`cv2.dnn` ONNX) — also `"detector"` in `config.json` |
+| `TRACKER_DETECTOR` | `hybrid` | `hybrid` (motion-gated YOLO) · `motion` · `yolo` · `nanodet` (ncnn) · `picodet` (ncnn) · `opencv` (`cv2.dnn` ONNX) — also `"detector"` in `config.json` |
 | `TRACKER_DNN_MODEL` | – | Model path for the `nanodet`/`opencv` detectors — also `"dnn_model"` in `config.json` |
 | `TRACKER_THREADS` | `4` | ncnn inference threads (also settable as `"threads"` in `config.json`) |
 | `TRACKER_MOTION_HOLD` | `60` | Seconds motion keeps detection armed |
@@ -349,12 +350,13 @@ Measured on x86 (ROI inference): YOLO26n `320x320` INT8 ≈ 30 fps; `288x288` �
 `256x256` ≈ 46 (smaller = faster, lower confidence). `run.py` logs
 `[stat] track=<fps> detect=<fps> tracks=<n>` every 10 s so the split is visible on-device.
 
-**Current production detector = `nanodet` → `NanoDetNcnn` with the NanoDet-Plus-m `416`
-model (RangiLyu's official `nanodet-plus-m_416_ncnn`, 1.52 GFLOPs, 30.4 mAP).** Selected
-in `config.json` (`"detector": "nanodet"`); measured ~19 `detect_fps` on the Pi 5. The
-code default is `hybrid` (motion-gated YOLO26n INT8 `320x320`), and `opencv` is the ONNX
-`cv2.dnn` variant (~12 fps). A/B over 97 real crossing frames: @416 found 97/97 (94
-truck) vs @320 88/97 (64) vs YOLO26n INT8@320 73/97 (72) — keep @416.
+**Current production detector = `picodet` → `PicodetNcnn` with PP-PicoDet-S @320 (ncnn,
+0.99M params / ~0.9 GFLOPs, COCO 80 classes; Qengineering's `picodet_s_320_coco_lcnet`).**
+Selected in `config.json` (`"detector": "picodet"`, `"dnn_imgsz": "320"`); measured ~21
+`detect_fps` / ~71 °C on the Pi 5. Alternatives: `"detector": "nanodet"` (NanoDet-Plus-m
+@416, `dnn_imgsz` 416) and the code default `hybrid` (motion-gated YOLO26n INT8 `320x320`).
+A/B over 97 real crossing frames: PicoDet-S@320 found 97/97 (93 truck) ≈ NanoDet-Plus-m@416
+97/97 (94) and ≫ YOLO26n INT8@320 74/97 (73).
 
 ## Gotchas
 
