@@ -346,6 +346,22 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   swing the centroid more than the margin — the durable fix is to move the counting line off
   the machine or shrink the ROI, not to raise the margin further (that starts missing real
   crossings). See the 2026-10-09 `id7 truck in` false count.
+- **When one vehicle occludes another *at the line*, the detector merges them into one box and
+  the centroid lies — use the box's leading edge (`probe`).** The 2026-10-13 `missed_out`
+  dumper passed directly behind a parked truck that sat *on* the line. PicoDet returned a
+  single `truck` box spanning both (conf 0.95; verified it is the model, not NMS — raising the
+  NMS IoU does not separate them). The merged box's *centroid* stays pinned at the parked
+  truck, so the moving truck's confirmed transit never reaches `confirm_frac`, and a new track
+  born past the line has no opposite-side history → the OUT is lost. The merged box's
+  **leading edge** (its left edge, at `obj.bbox[0]`) still tracks the moving truck, so
+  `config.json` `"probe": "left"` (or `TRACKER_PROBE=left`) makes the gate test that edge
+  instead of the centroid. Validated by `truck_ft/sweep.py` over 12 line positions: the clean
+  window grows from x≈0.60–0.85 (centroid) to x≈0.40–0.90 (leading edge), and the production
+  line (~0.55) goes from 0 to exactly **1 OUT** — with both the stock PicoDet and a
+  truck-only fine-tune. `"right"` is the mirror (left→right flow); default stays `"centroid"`.
+  This is *placement-independent*, unlike moving the line, so it survives a parked vehicle
+  anywhere. (A track "hand-off" that inherits a lost track's crossing when a new track is born
+  past the line was tried and **over-counts** — left disabled at `handoff_frac=0`.)
 - **A stream freeze must not drop the track — or it silently loses a count.**
   If the stream blocks for seconds, the vehicle moves far more than one frame's worth by the
   time frames resume; a raw-box IoU match then fails, a *new* track id is minted already past
@@ -409,6 +425,19 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   `dnn_imgsz` 416; the 1.5x-416 was ~15 fps) and the code default `hybrid` (motion-gated
   YOLO26n INT8 `320x320`) — switch `detector`/`dnn_model`/`dnn_imgsz` in `config.json`
   without editing the root-owned `tracker.env`.
+- **Truck-only fine-tune: `"detector": "picodet_libre"` (LibreYOLO export, RGB!).** A
+  LibreYOLO `LibrePICODETs` fine-tune on COCO truck (6127 train / 250 val, 30 epochs) is
+  staged at `models/picodet_s_320_truck/model.ncnn.{param,bin}`; `LibrePicoNcnn` decodes it
+  (single output `out0` (2125,5) = `[x1,y1,x2,y2,score]` in 320-space — no FCOS/GFL head to
+  decode, unlike `PicodetNcnn`). It has **one class (0=truck)**, reported to the app as COCO
+  **7** so it passes `enabled_classes` and matches the UI label. **Preprocess is RGB
+  (channel 0 = R), mean [123.675,116.28,103.53], std [58.395,57.12,57.375]** — *not* the BGR
+  of the Qengineering export; feeding BGR silently shifts the channel stats and returns a
+  different (wrong) wide box that over-counts at the line. Validated: ONNX (`weights/best.onnx`,
+  `images`→`output`) matches torch box-for-box under the RGB preprocess, and the ncnn export
+  reproduces the clip's single OUT with `probe="left"`. Pair it with `"probe": "left"`. It
+  stabilises the truck class (the base model mislabels ~5% of captures as bench/train/etc.),
+  but it is **not** a fix for the occlusion miss on its own.
 - `ncnn`'s wheel declares the GUI `opencv-python` (needs libxcb); first-boot.sh replaces
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads

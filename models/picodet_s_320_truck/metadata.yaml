@@ -1,0 +1,19 @@
+schema_version: '1.0'
+libreyolo_version: 1.6.0
+model_family: picodet
+size: s
+model_size: s
+task: detect
+supported_tasks:
+- detect
+default_task: detect
+nc: 1
+nb_classes: 1
+names:
+  '0': truck
+imgsz: 320
+imgsz_h: 320
+imgsz_w: 320
+precision: fp32
+dynamic: false
+obb: false

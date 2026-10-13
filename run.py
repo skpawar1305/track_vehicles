@@ -226,6 +226,12 @@ class Config:
         # the confirm distance cancels the pending crossing. 0 disables it
         # (legacy: count as soon as the margin is cleared).
         self.cross_confirm_frac = float(os.environ.get("TRACKER_CONFIRM_FRAC", "0.2"))
+        # Which point of the box crosses the line: "centroid" (default), or the
+        # box's "left"/"right" edge. Use an edge when another vehicle occludes
+        # the crossing and the detector merges them into one box (the merged
+        # box's leading edge still tracks the moving vehicle). Also configurable
+        # in config.json as "probe".
+        self.cross_probe = os.environ.get("TRACKER_PROBE", "centroid")
         # No-count polygon (normalized). Crossings are frozen while the centroid
         # is inside it — e.g. the excavator/loader's working area. Pi-local, set
         # from config.json; a remote config may also provide it.
@@ -317,6 +323,7 @@ class Config:
                     data.get("cross_rearm_frac", self.cross_rearm_frac))
                 self.cross_confirm_frac = float(
                     data.get("cross_confirm_frac", self.cross_confirm_frac))
+                self.cross_probe = data.get("probe", self.cross_probe)
                 self.model = data.get("model", self.model)
                 self.model_imgsz = data.get("model_imgsz", self.model_imgsz)
                 self.int8 = bool(data.get("int8", self.int8))
@@ -366,6 +373,7 @@ class Config:
                     "debug_overlay": self.debug_overlay,
                     "cross_rearm_frac": self.cross_rearm_frac,
                     "cross_confirm_frac": self.cross_confirm_frac,
+                    "probe": self.cross_probe,
                     "model": self.model,
                     "model_imgsz": self.model_imgsz,
                     "int8": self.int8,
@@ -556,16 +564,37 @@ class CrossingGate:
     """
 
     def __init__(self, min_age=4, margin_frac=0.06, rearm_frac=0.2,
-                 confirm_frac=0.2, seg_tol=0.02, keepout=None):
+                 confirm_frac=0.2, seg_tol=0.02, keepout=None,
+                 handoff_s=2.0, handoff_frac=0.0, probe_edge=None):
         self.min_age = min_age
         self.margin_frac = margin_frac
         self.rearm_frac = rearm_frac
         self.confirm_frac = confirm_frac   # 0 disables the confirmed transit
         self.seg_tol = seg_tol
         self.keepout = keepout             # pixel polygon [[x,y],...] or None
+        # Which point of the box is tested against the line. The centroid is
+        # dragged across the line when a vehicle is occluded by another and the
+        # detector merges them into one box; the *leading* edge of that merged
+        # box still tracks the moving vehicle, so "left"/"right" fix the count
+        # for a right->left / left->right flow respectively. None = centroid.
+        self.probe_edge = probe_edge
         self.last_pt = {}     # tid -> centroid where the last crossing committed
         self.side = {}        # tid -> last committed side (+1/-1) outside the band
         self.pending = {}     # tid -> side awaiting confirmation (diagnostics)
+        # Occlusion hand-off: when a vehicle is split into a new track that is
+        # *born already past the line* (its old track was dragged/lost by a
+        # merge with another vehicle), inherit the crossing if the opposite side
+        # was occupied moments ago. 0 disables it.
+        self.handoff_s = handoff_s
+        self.handoff_frac = handoff_frac   # spatial gate as a fraction of frame width
+        self.recent = {}      # side (+1/-1) -> (t, x, y) last credible sighting
+
+    def _probe(self, obj):
+        if self.probe_edge == "left":
+            return (float(obj.bbox[0]), (obj.bbox[1] + obj.bbox[3]) / 2.0)
+        if self.probe_edge == "right":
+            return (float(obj.bbox[2]), (obj.bbox[1] + obj.bbox[3]) / 2.0)
+        return obj.centroid
 
     def drop(self, dead_ids):
         for tid in dead_ids:
@@ -573,12 +602,15 @@ class CrossingGate:
             self.side.pop(tid, None)
             self.pending.pop(tid, None)
 
-    def update(self, line, obj, flip=False, frame_h=360):
+    def update(self, line, obj, flip=False, frame_h=360, now=None, frame_w=None):
+        if now is None:
+            now = time.time()
         if point_in_poly(self.keepout, obj.centroid):
             # Inside the no-count work area: freeze, so a machine working there
             # can neither commit a crossing nor disturb the committed side.
             return CROSSING_NONE
-        dist, t = line_geometry(line, obj.centroid)
+        pt = self._probe(obj)
+        dist, t = line_geometry(line, pt)
         if dist is None:
             return CROSSING_NONE
         margin = self.margin_frac * frame_h
@@ -588,7 +620,27 @@ class CrossingGate:
             self.pending.pop(obj.track_id, None)
             return CROSSING_NONE
         new_side = 1 if dist >= 0 else -1
+        # Remember the last credible sighting on each side (outside the band),
+        # for the occlusion hand-off below.
+        self.recent[new_side] = (now, float(pt[0]), float(pt[1]))
+        confirm = self.confirm_frac * frame_h if self.confirm_frac > 0 else margin
         prev = self.side.get(obj.track_id)
+        if (prev is None and self.handoff_frac > 0 and abs(dist) >= confirm):
+            # A *new* track born already at/inside the confirm depth on one side.
+            # If the opposite side was occupied within handoff_s and the gap is
+            # spatially plausible, this is the same vehicle reappearing across
+            # the line after an occluding merge -> hand off the crossing.
+            r = self.recent.get(-new_side)
+            if r is not None:
+                gap = ((pt[0] - r[1]) ** 2 + (pt[1] - r[2]) ** 2) ** 0.5
+                gate = self.handoff_frac * (frame_w or 640) + self.rearm_frac * frame_h
+                if (now - r[0]) <= self.handoff_s and gap <= gate:
+                    self.side[obj.track_id] = new_side
+                    self.last_pt[obj.track_id] = (float(pt[0]), float(pt[1]))
+                    self.pending.pop(obj.track_id, None)
+                    if flip:
+                        return CROSSING_OUT if new_side == 1 else CROSSING_IN
+                    return CROSSING_IN if new_side == 1 else CROSSING_OUT
         if prev is None or prev == new_side:
             # First sight, or still on the same committed side.
             self.side[obj.track_id] = new_side
@@ -611,23 +663,24 @@ class CrossingGate:
         # A genuine cross. Commit only if the track is old enough and has
         # re-armed away from its previous crossing; otherwise leave the side
         # unchanged so the cross can still commit on a later frame.
-        if obj.age < self.min_age or self.rearm_remaining(obj, frame_h):
+        if obj.age < self.min_age or self.rearm_remaining(obj, frame_h, pt):
             self.pending[obj.track_id] = new_side
             return CROSSING_BLOCKED
         self.side[obj.track_id] = new_side
         self.pending.pop(obj.track_id, None)
-        self.last_pt[obj.track_id] = (float(obj.centroid[0]), float(obj.centroid[1]))
+        self.last_pt[obj.track_id] = (float(pt[0]), float(pt[1]))
         if flip:
             return CROSSING_OUT if new_side == 1 else CROSSING_IN
         return CROSSING_IN if new_side == 1 else CROSSING_OUT
 
-    def rearm_remaining(self, obj, frame_h):
+    def rearm_remaining(self, obj, frame_h, pt=None):
         """Px the track still has to move from its last crossing before it can
         cross again (0.0 once re-armed; None if it has not crossed yet)."""
         lp = self.last_pt.get(obj.track_id)
         if lp is None:
             return None
-        d = ((obj.centroid[0] - lp[0]) ** 2 + (obj.centroid[1] - lp[1]) ** 2) ** 0.5
+        p = pt if pt is not None else obj.centroid
+        d = ((p[0] - lp[0]) ** 2 + (p[1] - lp[1]) ** 2) ** 0.5
         return max(0.0, self.rearm_frac * frame_h - d)
 
 # ── Capture Manager ───────────────────────────────────────────────────
@@ -889,6 +942,11 @@ class NanoDetNcnn:
 # for strides 8/16/32/64.
 _PICO_MEAN = [103.53, 116.28, 123.675]
 _PICO_NORM = [0.017429, 0.017507, 0.017125]
+# LibreYOLO's PP-PicoDet export is RGB (channel 0 = R), unlike the Qengineering
+# export above which is BGR. Feeding BGR silently shifts the channel stats and
+# returns different (wrong) boxes.
+_LIBRE_PICO_MEAN = [123.675, 116.28, 103.53]
+_LIBRE_PICO_NORM = [1.0 / 58.395, 1.0 / 57.12, 1.0 / 57.375]
 _PICO_HEADS = [(0, 1, 8), (2, 3, 16), (4, 5, 32), (6, 7, 64)]
 
 
@@ -1026,6 +1084,102 @@ class PicodetNcnn:
         if cx2 <= cx1 or cy2 <= cy1:
             return []
         return self._run(frame[cy1:cy2, cx1:cx2], enabled_classes, cx1, cy1)
+
+
+class LibrePicoNcnn:
+    """PP-PicoDet-S (single class) exported by LibreYOLO to ncnn.
+
+    Selected with ``"detector": "picodet_libre"`` in config.json. The graph is
+    input ``in0`` (1x3xSxS) with a single output ``out0`` already decoded to
+    ``(anchors, 5)`` = ``[x1, y1, x2, y2, score]`` in the SxS input space, so no
+    FCOS/GFL head decode is needed here (unlike ``PicodetNcnn``). Preprocess is a
+    plain stretch to SxS with the PicoDet mean/norm.
+
+    It has one class (0 = truck); every box is reported as COCO class 7 (truck)
+    so it passes the dashboard's ``enabled_classes`` filter and the UI label is
+    right. Use this for a truck-only fine-tune (see truck_ft/). Pair it with
+    ``"probe": "left"`` so a vehicle occluded at the line still counts.
+    """
+
+    def __init__(self, model_param, model_bin=None, conf_thresh=0.30,
+                 nms_thresh=0.6, num_threads=NUM_THREADS, input_size=320):
+        if model_bin is None:
+            model_bin = model_param[:-6] + ".bin"
+        self.conf_thresh = float(conf_thresh)
+        self.nms_thresh = float(nms_thresh)
+        self.input_size = int(input_size)
+        self.net = ncnn.Net()
+        self.net.opt.num_threads = num_threads
+        self.net.opt.use_fp16_arithmetic = True
+        self.input_name = "in0"
+        self.output_name = "out0"
+        self.net.load_param(model_param)
+        self.net.load_model(model_bin)
+
+    def _nms(self, boxes, scores):
+        order = scores.argsort()[::-1]
+        keep = []
+        x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+        areas = (x2 - x1) * (y2 - y1)
+        while order.size:
+            i = order[0]
+            keep.append(int(i))
+            xx1 = np.maximum(x1[i], x1[order[1:]])
+            yy1 = np.maximum(y1[i], y1[order[1:]])
+            xx2 = np.minimum(x2[i], x2[order[1:]])
+            yy2 = np.minimum(y2[i], y2[order[1:]])
+            inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
+            iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
+            order = order[np.where(iou <= self.nms_thresh)[0] + 1]
+        return keep
+
+    def _run(self, frame, ox, oy):
+        h, w = frame.shape[:2]
+        s = self.input_size
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mat = ncnn.Mat.from_pixels_resize(np.ascontiguousarray(rgb),
+                                          ncnn.Mat.PixelType.PIXEL_RGB, w, h, s, s)
+        mat.substract_mean_normalize(_LIBRE_PICO_MEAN, _LIBRE_PICO_NORM)
+        ex = self.net.create_extractor()
+        ex.input(self.input_name, mat)
+        _, out = ex.extract(self.output_name)
+        a = np.array(out)
+        if a.ndim != 2 or a.shape[0] == 0 or a.shape[1] < 5:
+            return []
+        scores = a[:, 4]
+        mask = scores >= self.conf_thresh
+        if not mask.any():
+            return []
+        b = a[mask, :4].astype(np.float32)
+        sc = scores[mask]
+        keep = self._nms(b, sc)
+        sx, sy = w / s, h / s
+        res = []
+        for k in keep:
+            bx1 = max(0, min(w - 1, int(b[k, 0] * sx))) + ox
+            by1 = max(0, min(h - 1, int(b[k, 1] * sy))) + oy
+            bx2 = max(0, min(w - 1, int(b[k, 2] * sx))) + ox
+            by2 = max(0, min(h - 1, int(b[k, 3] * sy))) + oy
+            if bx2 <= bx1 or by2 <= by1:
+                continue
+            res.append({'bbox': (bx1, by1, bx2, by2),
+                        'centroid': ((bx1 + bx2) // 2, (by1 + by2) // 2),
+                        'confidence': float(sc[k]), 'class_id': 7, 'label': 'truck'})
+        return res
+
+    def detect(self, frame, enabled_classes=None):
+        return self._run(frame, 0, 0)
+
+    def detect_roi(self, frame, roi_points, enabled_classes=None):
+        if roi_points is None or len(roi_points) < 3:
+            return self.detect(frame)
+        h, w = frame.shape[:2]
+        pts = np.array(roi_points, dtype=np.int32)
+        cx1, cy1 = int(max(0, pts[:, 0].min())), int(max(0, pts[:, 1].min()))
+        cx2, cy2 = int(min(w, pts[:, 0].max())), int(min(h, pts[:, 1].max()))
+        if cx2 <= cx1 or cy2 <= cy1:
+            return []
+        return self._run(frame[cy1:cy2, cx1:cx2], cx1, cy1)
 
 
 class CvDnnNanoDet:
@@ -2477,6 +2631,13 @@ def main():
                                    input_size=_parse_imgsz(cfg.dnn_imgsz)[0])
         print(f"[main] PP-PicoDet ncnn ({cfg.dnn_model}, {cfg.dnn_imgsz}, "
               f"score={cfg.dnn_conf}, nms_iou={cfg.dnn_iou}, {cfg.threads} threads)")
+    elif cfg.detector in ("picodet_libre", "libre"):
+        detector    = LibrePicoNcnn(model_param=cfg.dnn_model,
+                                    conf_thresh=cfg.dnn_conf, nms_thresh=0.6,
+                                    num_threads=cfg.threads,
+                                    input_size=_parse_imgsz(cfg.dnn_imgsz)[0])
+        print(f"[main] PicoDet (LibreYOLO, single-class) ncnn ({cfg.dnn_model}, "
+              f"{cfg.dnn_imgsz}, score={cfg.dnn_conf}, {cfg.threads} threads)")
     else:
         detector    = HybridDetector(conf_thresh=cfg.conf_thresh,
                                      motion_scale=cfg.motion_scale,
@@ -2523,7 +2684,8 @@ def main():
     cross_gate      = CrossingGate(min_age=cfg.min_track_age,
                                    margin_frac=cfg.cross_margin_frac,
                                    rearm_frac=cfg.cross_rearm_frac,
-                                   confirm_frac=cfg.cross_confirm_frac)
+                                   confirm_frac=cfg.cross_confirm_frac,
+                                   probe_edge=None if cfg.cross_probe in ("", "centroid") else cfg.cross_probe)
 
     latest = LatestFrame()
     shared = {"dets": [], "counter": 0, "lock": threading.Lock()}
@@ -2728,7 +2890,7 @@ def main():
                               f"c={obj.centroid} (wait)")
                     continue
                 crossing = cross_gate.update(line_px, obj, flip=cfg.flip_sides,
-                                             frame_h=h)
+                                             frame_h=h, now=now_t, frame_w=w)
                 if debug:
                     print(f"[dbg] #{obj.track_id} {obj.label} age={obj.age} c={obj.centroid} "
                           f"side={cross_gate.side.get(obj.track_id)} cross={crossing}")
