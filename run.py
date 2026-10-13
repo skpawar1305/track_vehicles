@@ -143,8 +143,9 @@ DUP_IOU = float(os.environ.get("TRACKER_DUP_IOU", "0.6"))
 CROSS_DEDUP_S = float(os.environ.get("TRACKER_CROSS_DEDUP_S", "1.0"))
 # Overlap alone can also suppress a genuinely separate vehicle queued right
 # behind another. So the de-dupe additionally demands the two boxes be the *same
-# vehicle*: their centres within this fraction of the frame width AND their
-# areas within a 2x ratio. A follower's centre is further away, so it survives.
+# vehicle*: their centres within this fraction of the frame width AND one box
+# almost entirely inside the other. A follower's centre is displaced along the
+# road, so it survives.
 DEDUP_CENTER_FRAC = float(os.environ.get("TRACKER_DEDUP_CENTER_FRAC", "0.03"))
 # Evidence: the saved full image comes from the camera's main profile; the
 # thumbnail is always built from the substream crossing frame, so the timeline
@@ -486,19 +487,25 @@ def box_iou(a, b):
 
 def same_vehicle_box(a, b, frame_w):
     """True when two crossing boxes are almost certainly one vehicle detected as
-    two class-boxes — near-identical position AND size — rather than two
-    genuinely separate vehicles (a queue) whose centres differ. Used to gate the
-    same-direction crossing de-dupe so a following truck is not suppressed."""
+    two boxes, rather than two separate vehicles (a queue). Their centres must
+    coincide, and one box must sit almost entirely inside the other — which
+    covers both a near-identical duplicate and a tight cab/front box nested in
+    the full-truck box (low IoU, so plain IoU-NMS misses it). A genuine follower,
+    even one mostly occluded by the leader, has its centre displaced along the
+    road. Kept conservative: a missed vehicle is worse than a duplicate."""
     if frame_w <= 0:
-        return True   # no scale to judge by: fall back to IoU-only
+        return True   # no scale to judge by: fall back to overlap only
     cxa, cya = (a[0] + a[2]) / 2.0, (a[1] + a[3]) / 2.0
     cxb, cyb = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
     if ((cxa - cxb) ** 2 + (cya - cyb) ** 2) ** 0.5 > DEDUP_CENTER_FRAC * frame_w:
         return False
-    area_a = max(1.0, (a[2] - a[0]) * (a[3] - a[1]))
-    area_b = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
-    ratio = area_a / area_b
-    return 0.5 <= ratio <= 2.0
+    iw = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    ih = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    small = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    # Conservative on purpose: a missed vehicle is worse than a duplicate, so
+    # only suppress a box that is *almost entirely* inside the other (>= 0.9 of
+    # its area). A partly-visible follower never qualifies.
+    return small > 0 and (iw * ih) / small >= 0.9
 
 
 def detect_crossing(line, old_centroid, new_centroid, flip=False):
@@ -2733,11 +2740,11 @@ def main():
                     continue
                 direction = 'IN' if crossing == CROSSING_IN else 'OUT'
                 # Safety net: if another track crossed the same way here moments
-                # ago (the duplicate track from a second class-box), count once.
+                # ago (the duplicate track from a second box), count once.
                 if CROSS_DEDUP_S > 0:
                     recent_cross = [rc for rc in recent_cross
                                     if now_t - rc[0] <= CROSS_DEDUP_S]
-                    if any(rc[1] == crossing and box_iou(obj.bbox, rc[2]) > DUP_IOU
+                    if any(rc[1] == crossing
                            and same_vehicle_box(obj.bbox, rc[2], w)
                            for rc in recent_cross):
                         if debug:

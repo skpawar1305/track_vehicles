@@ -198,12 +198,20 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   keeps both, the tracker then mints a second track, and both cross the line → a
   double count. `YoloNcnn._merge_cross_class` runs a **class-agnostic NMS** at
   `TRACKER_DUP_IOU` (default 0.6) after the per-class pass — this is the
-  Ultralytics `agnostic_nms` equivalent. A crossing-level de-dupe safety net
-  (same direction, IoU > `TRACKER_DUP_IOU`, **and `same_vehicle_box`** — centres
-  within `TRACKER_DEDUP_CENTER_FRAC` and areas within 2x, so a queued follower is
-  not collapsed — within `TRACKER_CROSS_DEDUP_S`, default 1 s) guarantees one
-  vehicle = one event. Do **not** try to fix this in the tracker: it is a detector
-  problem, and any tracker would mint two tracks from two boxes.
+  Ultralytics `agnostic_nms` equivalent. **The production PicoDet path also fires a
+  tight cab/front box *nested* in the full-truck box; its IoU with the full box is
+  low (~0.25, a cab is ~1/4 of the box), so IoU-NMS keeps both.** A crossing-level
+  de-dupe safety net therefore collapses a second same-direction crossing within
+  `TRACKER_CROSS_DEDUP_S` (default 1 s) when `same_vehicle_box` says they are one:
+  their centres within `TRACKER_DEDUP_CENTER_FRAC` (0.03) **and** one box almost
+  entirely inside the other (>= 0.9 of its area; covers the nested cab/full pair as
+  well as a near-identical duplicate). It is deliberately conservative — **a missed
+  vehicle is worse than a duplicate**, so anything ambiguous is left counted. The
+  strict centre gate — not containment or size — is what
+  keeps a genuinely queued/occluded follower counted: on this site a real follower
+  was 97% contained in the leader's box but its centre was 74 px away (vs 11–17 px
+  for the cab/full pair). Do **not** try to fix this in the tracker: it is a
+  detector problem, and any tracker would mint two tracks from two boxes.
 - **NanoDet can merge a vehicle into a lingering "container" box — drop by containment.**
   The `nanodet`/`opencv` detectors (`config.json` `"detector"`) sometimes emit a loose box
   around a vehicle — or spanning two adjacent trucks — whose IoU with the tight box is low,
@@ -321,14 +329,15 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   polygon where the gate **freezes** — no side change commits while the centroid is inside it.
   Place it over the machine's work area. `0.2` confirm distance plus the keep-out together
   neutralise it; the deeper fix is still to move the line off the machine.
-- **Overlap alone can suppress a queued follower — hence the centre/size check.** The
-  same-direction crossing de-dupe (`TRACKER_CROSS_DEDUP_S` + `TRACKER_DUP_IOU`) collapses the
-  two near-identical class-boxes of one vehicle, but two genuinely queued trucks can overlap
-  too. `same_vehicle_box()` therefore also requires the centres within
-  `TRACKER_DEDUP_CENTER_FRAC` (0.03) of the frame width AND areas within a 2x ratio, so a
-  follower (different centre) still counts. `TRACKER_TRACK_MAX_AGE` was raised 25 → 40 so a
-  briefly occluded truck keeps its id (and gate history) instead of being reminted already
-  past the line (a guaranteed under-count).
+- **Overlap alone can suppress a queued follower — hence the centre check, and bias to under-suppress.** The
+  same-direction crossing de-dupe (`TRACKER_CROSS_DEDUP_S`) collapses the two boxes of one
+  vehicle, but two genuinely queued trucks can overlap too — a real follower was 97% *contained*
+  in the leader's box. `same_vehicle_box()` therefore also requires the centres within
+  `TRACKER_DEDUP_CENTER_FRAC` (0.03) of the frame width **and** the smaller box ≥ 90% inside the
+  other, so a follower (different centre) still counts. Missing a vehicle is worse than a
+  duplicate, so never widen these to chase a stray double. `TRACKER_TRACK_MAX_AGE` was
+  raised 25 → 40 so a briefly occluded truck keeps its id (and gate history) instead of being
+  reminted already past the line (a guaranteed under-count).
 - **The margin must exceed the detector's box-refit wobble.** A stationary vehicle parked
   *on* the line is the pathological case: YOLO re-fits the box as its parts move (an
   excavator's arm swings in/out of the `truck` box), which drags the centroid tens of px

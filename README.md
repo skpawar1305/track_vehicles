@@ -461,12 +461,16 @@ A/B over 97 real crossing frames: PicoDet-S@320 found 97/97 (93 truck) ≈ NanoD
   NVR's last I-frame (main GOP=50 ≈ 2 s) and costs ~1.4 s + a 1.2 MB file. The real
   "main image lags the crossing" was the reader drifting behind live (see the
   unpaced-reader invariant above), fixed by removing the pacing sleep.
-- **One vehicle can arrive as two class-boxes — de-duplicated.** The INT8 detector
-  sometimes fires two near-identical boxes for one vehicle with different winning
-  classes (car/truck), which would otherwise become two tracks and two counts. A
-  class-agnostic NMS (`TRACKER_DUP_IOU`, default 0.6) merges them at the detector
-  (the Ultralytics `agnostic_nms` equivalent), and a crossing-level de-dupe
-  (`TRACKER_CROSS_DEDUP_S`, default 1 s) guarantees one event. Counting uses a
+- **One vehicle can arrive as two boxes — de-duplicated, conservatively.** The detector
+  sometimes fires two boxes for one vehicle with different winning classes (car/truck), or a
+  tight cab/front box nested in the full-truck box (IoU ~0.25, too low for NMS). Either would
+  become two tracks and two counts. A class-agnostic NMS (`TRACKER_DUP_IOU`, default 0.6)
+  merges the near-identical pair at the detector (the Ultralytics `agnostic_nms` equivalent),
+  and a crossing-level de-dupe (`TRACKER_CROSS_DEDUP_S`, default 1 s) collapses the nested case
+  too. That de-dupe is deliberately conservative — it requires the centres within
+  `TRACKER_DEDUP_CENTER_FRAC` (0.03) **and** one box ≥90% inside the other — because a missed
+  vehicle is worse than a duplicate: a genuine follower, even one mostly occluded, is centred
+  elsewhere on the road and always counts. Counting uses a
   two-tier tracker — IoU on the velocity-predicted box (`TRACKER_IOU_GATE`), with a
   gap-widened centroid-distance fallback — so the vehicle stays matchable across a
   multi-second stall.
