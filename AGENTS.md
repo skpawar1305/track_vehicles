@@ -283,10 +283,13 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   drop its `torch` import (the `xywh2xyxy`/`xyxy2xywh` isinstance checks) and replace the
   `lap` C-extension with `scipy.optimize.linear_sum_assignment` (scipy is already a dep), so
   the Pi needs no install — the upstream wheel otherwise pulls torch. **Call its `update()` only
-  when a new detector result arrives.** It is frame-based: advancing it on each reader frame
-  with `dets=[]` between ~6 fps inference results repeatedly deletes tentative tracks before
-  confirmation and can miss the crossing. `run.py` keeps the last track objects for display on
-  intervening reader frames and evaluates crossings only when a new detector result arrives;
+  when a new detector result arrives.** It is frame-based, while the Pi's reader/tracking loop
+  runs the substream at **25+ fps** (`stream_fps` in `/tmp/tracker_stats.json`; measured
+  22.5–25.9 on the Pi 5 — the reported rate, not the fresh-frame rate). Advancing it on each
+  reader frame with `dets=[]` between the slower inference results repeatedly deletes tentative
+  tracks before confirmation and can miss the crossing. `run.py` keeps the last track objects
+  for display on intervening reader frames and evaluates crossings only when a new detector
+  result arrives;
   the centroid backend may still coast with empty detections. ByteTrack only *outputs* live
   tracks, so the adapter also emits its `lost_stracks` as Kalman predictions with
   `prev_centroid=None` (display only, never a crossing — run.py skips them)

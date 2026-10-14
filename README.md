@@ -78,7 +78,8 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
   needs no extra install. The adapter coasts ByteTrack's lost tracks (Kalman-predicted,
   `prev_centroid=None`) so the live overlay and gate bookkeeping don't flicker between
   detector updates. **Advance ByteTrack only when a new detector result arrives**: it is
-  frame-based, while the reader can deliver about 25 fps and inference runs at its own rate.
+  frame-based, while the Pi's reader/tracking loop runs the substream at 25+ fps (`stream_fps`,
+  measured 22.5–25.9) and inference refreshes detections at its own (slower) rate.
   Sending empty updates for intervening reader frames ages/removes tentative tracks before
   the next real detection. The app carries the last track objects for display between
   results, but evaluates crossings only on fresh detections (and never on Kalman-only
