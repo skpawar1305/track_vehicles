@@ -296,6 +296,20 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   to stop the live overlay blinking between detector updates. ByteTrack ids are global and
   never reused, but the adapter still prunes per-id `prev`/`age` for ids ByteTrack retired, or
   it leaks for months. `bytetracker` in the dev harnesses is the laptop-only upstream.
+- **Production uses the `centroid` backend, not ByteTrack, because ByteTrack's Kalman is
+  frame-based and the detector is not.** ByteTrack advances its Kalman one nominal frame per
+  `update()` call; stepping it only on detections (the fix above) is right for its tentative
+  logic but means its predicted box lags the vehicle by the reader/detector frame ratio, so a
+  moving vehicle's track goes *lost* and is emitted with `prev_centroid=None` — and the gate
+  skips predicted objects, so no crossing. Measured on `missed_out_2.mp4`: at detection
+  cadences ≥4 (detect-every 4/5/7 frames) the crossing vehicle came out of
+  `bytetracker.update()` as a *lost* track and the OUT was lost; the OLD empty-update cadence
+  lost it at cadences 2–7. The `CentroidTracker` tracks in **px/s with variable `dt`**
+  (velocity extrapolation + two-tier IoU/distance association), so it is cadence-independent:
+  replayed through the production PicoDet+line/ROI+`probe=left` path it returned **exactly one
+  OUT on both `missed_out.mp4` and `missed_out_2.mp4` at every detection cadence 2–7**, while
+  ByteTrack missed `missed_out_2` at 4/5/7. Keep ByteTrack only if the detector runs at a fixed
+  frame rate matching its `frame_rate`; otherwise use `centroid` (`config.json` `"tracker"`).
 - **The crossing gate is three rules: hysteresis + confirmed transit + re-arm.** Earlier
   versions stacked min-age + min-travel-from-birth + cooldown + a 15-frame refractory + this
   same re-arm; the extra gates were either redundant or wrong (net-travel from *birth* never

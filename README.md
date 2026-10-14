@@ -85,6 +85,12 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
   results, but evaluates crossings only on fresh detections (and never on Kalman-only
   predictions). New ByteTrack tracks are exposed immediately; the crossing gate's side
   history, hysteresis, and confirmed-transit distance provide the crossing validation.
+  **Production runs `centroid`, not `bytetrack`.** ByteTrack's Kalman advances one nominal
+  frame per `update()`, so stepping it only on detections makes its predicted box lag a moving
+  vehicle by the reader/detector frame ratio: the track goes *lost*, is emitted with
+  `prev_centroid=None`, and the gate skips it. `CentroidTracker` tracks in px/s with variable
+  `dt`, so it is detector-cadence-independent (it caught both `missed_out*.mp4` at every cadence
+  2–7; ByteTrack missed one of them at 4/5/7). Use `bytetrack` only with a fixed-rate detector.
 - **Detector settings come from the PicoDet repo.** mean `[103.53,116.28,123.675]`,
   norm `1/[57.375,57.12,58.395]`, `reg_max=7`, `fp16` arithmetic, and **per-class NMS at
   IoU 0.3** with the repo's `+1`-pixel area convention (`TRACKER_DNN_IOU`). We keep our
