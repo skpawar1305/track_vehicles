@@ -438,12 +438,34 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   reproduces the clip's single OUT with `probe="left"`. Pair it with `"probe": "left"`. It
   stabilises the truck class (the base model mislabels ~5% of captures as bench/train/etc.),
   but it is **not** a fix for the occlusion miss on its own.
+  **Do NOT put this fine-tune in production: it is badly overfit — a 1-class COCO-truck
+  model learns the burned-in OSD text as a truck.** Measured 2026-10-14 over 60 real site
+  frames (conf 0.30, car/bus/truck): base `picodet` gave 61 dets (55 truck, 6 bus), **0**
+  timestamp false positives, 0 duplicate boxes; the fine-tune gave 116 dets (all truck),
+  **19** detections in the top OSD strip and **6/60** frames with overlapping duplicate
+  boxes. It boxes the camera's `10-13-2026 Tue …` overlay as `truck` (the embankment live
+  feed showed two such boxes stacked on the datetime). A threshold sweep does not rescue it:
+  at 0.60 the OSD FPs and dups clear but 3/60 frames lose the truck, i.e. it is overfitting,
+  not a low threshold. **Production stays on the base `picodet`** (COCO-80,
+  `/opt/tracker/models/picodet_s_320.ncnn.param`); the fine-tune is kept only as an
+  experiment (`"detector": "picodet_libre"`). The durable fix for stable truck labels is
+  retraining with OSD/timestamp crops as hard negatives *while keeping a class that can say
+  "not a truck"* — a pure 1-class fine-tune cannot separate text from a truck.
 - `ncnn`'s wheel declares the GUI `opencv-python` (needs libxcb); first-boot.sh replaces
   it with `opencv-python-headless`.
 - Counting classes come from the dashboard (`enabled_classes`); the detect thread reads
   them live, so no restart is needed. Dumpers = COCO class 7 (truck). Two-wheelers
   (COCO 1 bicycle, 3 motorcycle) are filtered out in `run.py` *and* on the VPS, so the
   UI offers only car/bus/truck (2/5/7).
+- **A site with only one kind of vehicle can remap the others to it (`vehicle_labels`).**
+  `config.json` `"vehicle_labels": {"2": "truck", "5": "truck"}` makes
+  `apply_vehicle_labels()` (called in `detect_loop`) relabel car/bus detections as
+  `truck` — the matching COCO id is applied too, so the stored `class_id`/`label` stay
+  consistent. On this dumper-only site the base PicoDet's ~5% `bus`/`car` mislabels
+  therefore display and store as `truck` instead of looking like a different vehicle;
+  counting is by direction, so the totals were never affected. It is a display/analytics
+  fix, not a detector fix, and must be listed in `save()` or the next remote config pull
+  would drop it. Do not map a class that can genuinely appear.
 - **`/terminal` is a reverse WebSocket, not inbound SSH.** `term_agent.py` dials the VPS
   (`/api/term?role=agent`, Bearer) and bridges the socket to a local PTY; the browser
   attaches with a short-lived token from the Basic-auth page. Keep it outbound-only —

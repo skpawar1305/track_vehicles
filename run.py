@@ -260,6 +260,10 @@ class Config:
         # config.json to A/B on the edge.
         self.dnn_conf = float(os.environ.get("TRACKER_DNN_CONF", "0.3"))
         self.dnn_iou  = float(os.environ.get("TRACKER_DNN_IOU", "0.3"))
+        # Optional class->label remap (config.json "vehicle_labels"), e.g.
+        # {"2": "truck", "5": "truck"} on a site where every vehicle is a truck
+        # and the detector's car/bus boxes are just truck mislabels.
+        self.vehicle_labels = None
         # Debug overlay (hysteresis band + per-track re-arm state) on the live feed.
         self.debug_overlay = os.environ.get("TRACKER_DEBUG_OVERLAY", "0") == "1"
         self.running = True
@@ -333,6 +337,9 @@ class Config:
                 self.tracker = data.get("tracker", self.tracker)
                 self.dnn_conf = float(data.get("dnn_conf", self.dnn_conf))
                 self.dnn_iou  = float(data.get("dnn_iou", self.dnn_iou))
+                _vl = data.get("vehicle_labels")
+                self.vehicle_labels = ({int(k): str(v) for k, v in _vl.items()}
+                                       if isinstance(_vl, dict) else None)
                 self.cam2_url = data.get("cam2_url", self.cam2_url)
                 self.capture_url = data.get("capture_url", self.capture_url)
                 self.capture_rtsp = data.get("capture_rtsp", self.capture_rtsp)
@@ -383,6 +390,8 @@ class Config:
                     "tracker": self.tracker,
                     "dnn_conf": self.dnn_conf,
                     "dnn_iou": self.dnn_iou,
+                    "vehicle_labels": ({str(k): v for k, v in self.vehicle_labels.items()}
+                                       if self.vehicle_labels else None),
                     "cam2_url": self.cam2_url, "capture_url": self.capture_url,
                     "capture_rtsp": self.capture_rtsp,
                     "capture_main_stream": self.capture_main_mode}
@@ -742,6 +751,28 @@ class CaptureManager:
 
 # ── NanoDet ncnn Detector ─────────────────────────────────────────────
 _VEHICLE_NAMES = {2: 'car', 3: 'motorcycle', 5: 'bus', 7: 'truck', -1: 'motion'}
+_VEHICLE_NAME_IDS = {v: k for k, v in _VEHICLE_NAMES.items()}
+
+
+def apply_vehicle_labels(dets, mapping):
+    """Relabel detections by class id (config ``vehicle_labels``).
+
+    On a truck-only site the detector's occasional ``car``/``bus`` is a truck
+    mislabel, so map those classes to ``truck`` (e.g. ``{"5": "truck"}``). The
+    matching COCO id is applied too, so the stored ``class_id`` and ``label``
+    stay consistent. No mapping -> detections are returned unchanged.
+    """
+    if not mapping:
+        return dets
+    out = []
+    for d in dets:
+        lbl = mapping.get(d["class_id"])
+        if lbl:
+            d = dict(d)
+            d["label"] = lbl
+            d["class_id"] = _VEHICLE_NAME_IDS.get(lbl, d["class_id"])
+        out.append(d)
+    return out
 _MEAN = np.array([103.53, 116.28, 123.675], dtype=np.float32)
 _STD  = np.array([57.375,  57.12,  58.395], dtype=np.float32)
 _STRIDES = [8, 16, 32, 64]
@@ -1995,6 +2026,7 @@ def detect_loop(detector, cfg, latest, shared, stop):
                                f"[detect] implausible detections ({len(dets)}) "
                                f"— glitch, ignoring", every=30)
                 dets = []
+            dets = apply_vehicle_labels(dets, cfg.vehicle_labels)
             with shared["lock"]:
                 shared["dets"] = dets
                 shared["counter"] += 1
