@@ -281,9 +281,14 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   `bytetracker/` package vendored into the repo (Kalman + two-stage IoU). It was patched to
   drop its `torch` import (the `xywh2xyxy`/`xyxy2xywh` isinstance checks) and replace the
   `lap` C-extension with `scipy.optimize.linear_sum_assignment` (scipy is already a dep), so
-  the Pi needs no install — the upstream wheel otherwise pulls torch. ByteTrack only *outputs*
-  live tracks, so the adapter also emits its `lost_stracks` as Kalman predictions with
-  `prev_centroid=None` (display only, never a crossing — run.py skips `prev_centroid is None`)
+  the Pi needs no install — the upstream wheel otherwise pulls torch. **Call its `update()` only
+  when a new detector result arrives.** It is frame-based: advancing it on each reader frame
+  with `dets=[]` between ~6 fps inference results repeatedly deletes tentative tracks before
+  confirmation and can miss the crossing. `run.py` keeps the last track objects for display on
+  intervening reader frames and evaluates crossings only when a new detector result arrives;
+  the centroid backend may still coast with empty detections. ByteTrack only *outputs* live
+  tracks, so the adapter also emits its `lost_stracks` as Kalman predictions with
+  `prev_centroid=None` (display only, never a crossing — run.py skips them)
   to stop the live overlay blinking between detector updates. ByteTrack ids are global and
   never reused, but the adapter still prunes per-id `prev`/`age` for ids ByteTrack retired, or
   it leaks for months. `bytetracker` in the dev harnesses is the laptop-only upstream.

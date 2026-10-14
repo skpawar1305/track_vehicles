@@ -65,9 +65,12 @@ class STrack(BaseTrack):
 
         self.tracklet_len = 0
         self.state = TrackState.Tracked
-        if frame_id == 1:
-            self.is_activated = True
-        # self.is_activated = True
+        # This backend receives detector results only (~6 fps on the Pi), not
+        # every reader frame. The crossing gate itself requires side history
+        # plus a confirmed transit across the line, so ByteTrack's one-frame
+        # tentative suppression only hides useful first observations and can
+        # lose a vehicle that moves substantially before the next inference.
+        self.is_activated = True
         self.frame_id = frame_id
         self.start_frame = frame_id
 

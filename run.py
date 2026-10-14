@@ -1859,12 +1859,13 @@ class ByteTrackAdapter:
     """Expose the vendored ByteTrack (Kalman + two-stage IoU) behind the same
     ``update(dets, w, h, now=) -> list[TrackInfo]`` interface as CentroidTracker.
 
-    Selected with ``"tracker": "bytetrack"`` in config.json. dets is the same
-    list of dicts the detectors emit; we hand ByteTrack an ``(N, 6)`` array of
-    ``[x1, y1, x2, y2, score, class_id]``. ByteTrack only *outputs* live tracks,
-    so we also coast its ``lost_stracks`` (Kalman-predicted, prev_centroid=None)
-    to keep the live overlay and the gate bookkeeping from flickering while the
-    detector catches up.
+    Selected with ``"tracker": "bytetrack"`` in config.json. Call ``update``
+    only when a new detector result is available; the vendored ByteTrack advances
+    one frame per call. dets is the same list of dicts the detectors emit; we
+    hand ByteTrack an ``(N, 6)`` array of ``[x1, y1, x2, y2, score, class_id]``.
+    ByteTrack only *outputs* live tracks, so we also coast its ``lost_stracks``
+    (Kalman-predicted, prev_centroid=None) to keep the live overlay from blinking
+    between detector updates.
     """
 
     def __init__(self, track_thresh=0.3, track_buffer=40, match_thresh=0.8,
@@ -2837,19 +2838,23 @@ def main():
                 prev_frame_t = now_t
                 total_frames += 1
 
-                # Consume fresh detections if the detect thread produced any; else
-                # feed an empty list so the tracker coasts between detector updates.
+                # Snapshot whether a detector result is new. ByteTrack must only
+                # advance on new results; intervening reader frames just carry its
+                # last tracks for display. The centroid backend can coast on empty
+                # detections at reader rate.
                 with shared["lock"]:
                     dcount = shared["counter"]
                     raw_detections = list(shared["dets"])
-                if dcount == used_det:
-                    raw_detections = []
-                else:
+                new_detections = dcount != used_det
+                if new_detections:
                     used_det = dcount
 
-                # Update the IoU tracker with fresh detections (empty list
-                # just coasts tracks between detector updates).
-                objects = tracker.update(raw_detections, w, h, now=now_t)
+                # Its update() is frame-based and treats an empty frame as a
+                # missed detection; at 25 fps tracking / ~6 fps inference that
+                # deletes tentative tracks before confirmation.
+                if new_detections or not isinstance(tracker, ByteTrackAdapter):
+                    objects = tracker.update(raw_detections if new_detections else [],
+                                             w, h, now=now_t)
 
                 # Track ids are never reused, so drop per-id gate state for
                 # tracks the tracker just retired — otherwise the gate's
@@ -2913,9 +2918,19 @@ def main():
 
             if not fresh:
                 continue
+            # ByteTrack results are carried between detector runs for the live
+            # overlay. Do not feed the same measured object to the crossing gate
+            # repeatedly at reader FPS; one gate observation per inference is
+            # sufficient and keeps side/pending state tied to actual detections.
+            if isinstance(tracker, ByteTrackAdapter) and not new_detections:
+                continue
 
             debug = os.environ.get("TRACKER_DEBUG") == "1"
             for obj in objects:
+                # Coasted/Kalman-predicted objects are useful for the live
+                # overlay, but are not a fresh measurement of a line crossing.
+                if obj.prev_centroid is None:
+                    continue
                 if obj.age < cfg.min_track_age:
                     if debug:
                         print(f"[dbg] #{obj.track_id} {obj.label} age={obj.age} "

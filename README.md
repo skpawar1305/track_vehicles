@@ -77,7 +77,13 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
   `scipy.optimize.linear_sum_assignment` (scipy is already a dependency), so the Pi
   needs no extra install. The adapter coasts ByteTrack's lost tracks (Kalman-predicted,
   `prev_centroid=None`) so the live overlay and gate bookkeeping don't flicker between
-  detector updates.
+  detector updates. **Advance ByteTrack only when a new detector result arrives**: it is
+  frame-based, while the reader can deliver about 25 fps and inference runs at its own rate.
+  Sending empty updates for intervening reader frames ages/removes tentative tracks before
+  the next real detection. The app carries the last track objects for display between
+  results, but evaluates crossings only on fresh detections (and never on Kalman-only
+  predictions). New ByteTrack tracks are exposed immediately; the crossing gate's side
+  history, hysteresis, and confirmed-transit distance provide the crossing validation.
 - **Detector settings come from the PicoDet repo.** mean `[103.53,116.28,123.675]`,
   norm `1/[57.375,57.12,58.395]`, `reg_max=7`, `fp16` arithmetic, and **per-class NMS at
   IoU 0.3** with the repo's `+1`-pixel area convention (`TRACKER_DNN_IOU`). We keep our
