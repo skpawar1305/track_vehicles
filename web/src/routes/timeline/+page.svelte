@@ -1,15 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { get } from "svelte/store";
-  import { page } from "$app/stores";
-  import { days, todayCounts } from "$lib/stores";
-  import { dayLabel, fmtTimeParts, todayKey, ymd } from "$lib/format";
-  import type { DayEvent } from "$lib/types";
+  import { page } from "$app/state";
+  import { days, todayCounts } from "#lib/stores.js";
+  import { dayLabel, fmtTimeParts, todayKey, ymd } from "#lib/format.js";
+  import type { DayEvent } from "#lib/types.js";
 
   type DayData = { day: string; counts: { in: number; out: number }; events: DayEvent[] };
 
   function initDay() {
-    const d = $page.url.searchParams.get("day") ?? $page.url.searchParams.get("d");
+    const d = page.url.searchParams.get("day") ?? page.url.searchParams.get("d");
     return d && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : todayKey();
   }
 

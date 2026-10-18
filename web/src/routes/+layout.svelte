@@ -1,15 +1,15 @@
 <script lang="ts">
   import "../app.css";
   import { onMount } from "svelte";
-  import { page } from "$app/stores";
-  import { days, todayCounts, edge, liveOk, cam2, setupOpen } from "$lib/stores";
-  import { clockText } from "$lib/format";
-  import SetupSheet from "$lib/components/SetupSheet.svelte";
+  import { page } from "$app/state";
+  import { days, todayCounts, edge, liveOk, cam2, setupOpen } from "#lib/stores.js";
+  import { clockText } from "#lib/format.js";
+  import SetupSheet from "#lib/components/SetupSheet.svelte";
 
   let { children } = $props();
 
   let now = $state(new Date());
-  let path = $derived($page.url.pathname);
+  let path = $derived(page.url.pathname);
   let isLive = $derived(path === "/live");
   let isTimeline = $derived(path === "/timeline");
   let isTerm = $derived(path === "/terminal");

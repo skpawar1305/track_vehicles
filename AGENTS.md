@@ -242,6 +242,12 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   `build/` to `WEB_ROOT` (+ `server.ts`), restart `tracker-web.service`. Do **not** add
   `+server.ts` / `+*server.ts` files to the SvelteKit app — adapter-static forbids server
   routes; the API lives only in `server.ts`.
+- **`web/` is on SvelteKit 3 / Vite 8.** There is no `svelte.config.js` — `adapter` and
+  `preprocess` live in the `sveltekit({...})` options in `web/vite.config.ts`. Internal
+  imports use the `#lib/*` package alias (`package.json` `imports`), not `$lib`; page state
+  is `page` from `$app/state`, not the removed `$app/stores`; and `tsconfig.json` extends
+  `$app/tsconfig` and includes `$app/types`. Build with Node 22.17+ / Bun. Deployed web
+  assets are just `web/build/` + `server.ts`; the VPS does not need the SvelteKit toolchain.
 - **The `/timeline` view is counts-first; captures load per day on demand.** The SPA fetches
   `GET /api/events` (per-day IN/OUT counts, polled every 8 s) and `GET /api/day?d=YYYY-MM-DD`
   for the open day (cached client-side, stale-while-revalidate, so day-hopping never flashes

@@ -234,9 +234,12 @@ to grant more privilege (not recommended).
 
 ## VPS dashboard
 
-The UI is a **static SvelteKit SPA** (`web/`, `@sveltejs/adapter-static`); the Bun API server
-(`web/server.ts`) owns `/api/*`, image serving, and the reverse-terminal WS, and serves the
-SPA's assets (client routes fall back to `index.html`).
+The UI is a **static SvelteKit 3 SPA** (`web/`, `@sveltejs/adapter-static`, Vite 8); the Bun
+API server (`web/server.ts`) owns `/api/*`, image serving, and the reverse-terminal WS, and
+serves the SPA's assets (client routes fall back to `index.html`). SvelteKit configuration
+lives in `vite.config.ts` (`svelte.config.js` is no longer supported), internal modules import
+via the `#lib/*` alias, and page state comes from `$app/state`. Building needs Node 22.17+
+(or Bun); the VPS only receives the built assets and `server.ts`.
 
 ```bash
 cd web

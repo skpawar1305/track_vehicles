@@ -1,3 +1,4 @@
+import type { ServerWebSocket } from "bun";
 import { Database } from "bun:sqlite";
 import { mkdirSync, unlinkSync, renameSync } from "node:fs";
 import { resolve } from "node:path";
@@ -886,7 +887,7 @@ function pruneOldEvents() {
 setInterval(pruneOldEvents, 3_600_000);
 pruneOldEvents();
 
-Bun.serve({
+Bun.serve<TermData>({
   port: PORT,
   hostname: HOST,
   websocket: {
@@ -1127,7 +1128,7 @@ Bun.serve({
     if (url.pathname === "/live.jpg") {
       liveJpgAt = Date.now();
       if (!liveFrame || Date.now() - liveAt > 10_000) return new Response("no live feed", { status: 404 });
-      return new Response(liveFrame, {
+      return new Response(liveFrame as unknown as BodyInit, {
         headers: {
           "content-type": "image/jpeg",
           "cache-control": "no-store",
@@ -1140,7 +1141,7 @@ Bun.serve({
     if (url.pathname === "/live2.jpg") {
       live2JpgAt = Date.now();
       if (!live2Frame || Date.now() - live2At > 10_000) return new Response("no live feed", { status: 404 });
-      return new Response(live2Frame, {
+      return new Response(live2Frame as unknown as BodyInit, {
         headers: {
           "content-type": "image/jpeg",
           "cache-control": "no-store",

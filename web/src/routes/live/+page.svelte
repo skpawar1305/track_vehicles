@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { cam2, liveOk } from "$lib/stores";
+  import { cam2, liveOk } from "#lib/stores.js";
 
   let active = $state<"main" | "cam2">("main");
   let mainEl = $state<HTMLImageElement | undefined>();

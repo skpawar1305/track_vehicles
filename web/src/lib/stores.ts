@@ -1,5 +1,5 @@
 import { writable } from "svelte/store";
-import type { DayCounts, DaysMap, DayEvent } from "$lib/types";
+import type { DayCounts, DaysMap, DayEvent } from "#lib/types.js";
 
 export type { DayCounts, DaysMap, DayEvent };
 

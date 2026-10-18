@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { setupOpen } from "$lib/stores";
+  import { setupOpen } from "#lib/stores.js";
 
   type Pt = [number, number];
   type Cfg = {
