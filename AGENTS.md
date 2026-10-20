@@ -289,6 +289,16 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   line; `tools/test_tracker_reacquire.py` pins the re-association). Sort key is
   `(tier, cost)`, so every IoU match beats any fallback and the best per-tier match is chosen
   (greedy).
+- **No stock tracker fixes `failed/ins/2`; the remaining bug is detector identity, not the
+  association math.** A production-faithful bake-off (`tools/bench_tracker_clips.py`: PicoDet
+  @320, server line/ROI, `flip`, `probe=left`, cadence 1–7, distinct-id/first-side checks)
+  shows `centroid`, OC-SORT, SORT, ByteTrack, a Hungarian motion variant and an HSV-appearance
+  variant all fail the IN. The left truck is occluded ~1.9 s (longer than `max_age=40` at
+  25 fps) and reappears on the far side as a new id; the oncoming truck also emits a nested
+  cab/full box. Containment suppression + `max_age=75` restores the IN at 5/6 cadences, but
+  cadence 4 still swaps the IN onto the OUT id. Do not keep swapping trackers or widening
+  thresholds; the durable fixes are a better/segmentation detector or a real appearance/ReID
+  model.
 - **ByteTrack is an optional backend, vendored and patched.** `"tracker": "bytetrack"` in
   `config.json` (`TRACKER_TRACKER`) swaps `CentroidTracker` for `ByteTrackAdapter`, wrapping a
   `bytetracker/` package vendored into the repo (Kalman + two-stage IoU). It was patched to

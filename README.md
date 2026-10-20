@@ -129,6 +129,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 |------|---------|
 | `run.py` | Headless edge loop: ncnn detector + centroid/ByteTrack tracker + crossing + capture + SQLite |
 | `bytetracker/` | Vendored ByteTrack (Kalman + two-stage IoU); `torch`/`lap` removed so it runs on the Pi |
+| `ocsort/` | Vendored OC-SORT core (MIT), used only by the tracker bake-off; no torch/filterpy |
 | `rtsp_relay.py` | SHA-256 RTSP Digest → local RTP/SDP shim for cameras FFmpeg can't authenticate |
 | `store.py` | Offline-first SQLite event store (+ retention prune) |
 | `sync.py` | HTTP upload worker (retries; deletes after ACK) |
@@ -141,6 +142,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/test_crossing.py` | Synthetic crossing-gate regression (incl. a centroid-vs-bottom-edge probe comparison) + annotated re-arm demo video |
 | `tools/test_tracker_cadence.py` | Regression: the centroid tracker returns exactly one OUT at every detection cadence 2–7 |
 | `tools/test_tracker_reacquire.py` | Regression: a track re-acquires after an occlusion gap instead of minting a new id |
+| `tools/bench_tracker_clips.py` | Production-faithful tracker bake-off on `failed/outs/1,2` + `failed/ins/2` (centroid/OC-SORT/SORT/ByteTrack/motion/appearance; cadence + identity checks) |
 | `tools/set_camera_time.py` | Read/set a camera clock over ONVIF (Manual or NTP) |
 | `tools/onvif_media.py` | Inspect a camera's ONVIF encoder configs / profiles / RTSP URIs (diagnose a blurry substream) |
 | `tools/onvif_imaging.py` | Read/set a camera's ONVIF imaging settings (WDR/BLC/IR-cut/brightness/gain); dry-run by default |
