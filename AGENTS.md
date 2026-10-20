@@ -281,8 +281,14 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   Tier 2 (fallback) is a centroid-distance gate that widens with the gap
   (`TRACKER_ASSOC_FRAC` + `TRACKER_ASSOC_GAP_FRAC`, capped by `TRACKER_ASSOC_MAX_FRAC`): a
   tracked vehicle whose box changed shape/speed so IoU misses is still re-acquired by
-  proximity. Sort key is `(tier, cost)`, so every IoU match beats any fallback and the best
-  per-tier match is chosen (greedy).
+  proximity. **The widening must use `meas_t` (last real detection), not `last_t`:** every
+  coasting update advances `last_t`, so using it leaves the gate at one frame's width and an
+  occluded vehicle that reappears a second later is minted as a new track. When that new id
+  is born past the counting line it has no opposite-side history, so the crossing is lost
+  (2026-10-20 `failed/ins/2.mp4`: the IN truck passed behind the oncoming OUT truck at the
+  line; `tools/test_tracker_reacquire.py` pins the re-association). Sort key is
+  `(tier, cost)`, so every IoU match beats any fallback and the best per-tier match is chosen
+  (greedy).
 - **ByteTrack is an optional backend, vendored and patched.** `"tracker": "bytetrack"` in
   `config.json` (`TRACKER_TRACKER`) swaps `CentroidTracker` for `ByteTrackAdapter`, wrapping a
   `bytetracker/` package vendored into the repo (Kalman + two-stage IoU). It was patched to

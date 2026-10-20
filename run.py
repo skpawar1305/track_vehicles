@@ -1781,9 +1781,17 @@ class CentroidTracker:
             dt = now - t['last_t']
             if dt < 0.0:
                 dt = 0.0
+            # Coasting updates advance `last_t` every frame, so it is not the
+            # measurement gap. Widen the fallback gate from `meas_t` instead:
+            # an occluded track that reappears far from its (possibly stale)
+            # predicted position must still re-associate, or a new id is minted
+            # already past the line with no crossing history.
+            gap = now - t['meas_t']
+            if gap < 0.0:
+                gap = 0.0
             pbox = self._pred_box(t, dt)
             pcen = self._advance(t, dt)
-            gate = min(base + self.gap_frac * w * dt, max_gate)
+            gate = min(base + self.gap_frac * w * gap, max_gate)
             for i, d in enumerate(dets):
                 iou = box_iou(pbox, d['bbox'])
                 if iou >= self.iou_gate:

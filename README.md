@@ -67,8 +67,11 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
   this is a standard IoU tracker; (2) a **centroid-distance fallback** whose gate widens
   with the gap (`TRACKER_ASSOC_FRAC`, `TRACKER_ASSOC_GAP_FRAC`, capped by
   `TRACKER_ASSOC_MAX_FRAC`), so a track re-acquires a vehicle that moved far during a
-  multi-second stall even if the predicted box missed. IoU always wins over the fallback.
-  No appearance model; suits sparse traffic, not dense crowds.
+  multi-second stall even if the predicted box missed. The gap is measured from the last
+  real detection (`meas_t`), not `last_t` (which advances on every coasting frame): an
+  occluded truck that reappears a second later must keep its id, or a new id born past the
+  line loses the crossing. IoU always wins over the fallback. No appearance model; suits
+  sparse traffic, not dense crowds.
 - **Tracker backend.** `TRACKER_TRACKER` (or `"tracker"` in `config.json`) selects the
   association engine: `centroid` (default, the two-tier tracker above) or `bytetrack`.
   The ByteTrack path wraps a **vendored copy** of the `bytetracker` package in
@@ -136,6 +139,8 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/live_push.py` | Dev harness that mimics `run.py` from a laptop (can push to the VPS) |
 | `tools/test_clip.py` | Run the production tracker/crossing over a video clip and report IN/OUT |
 | `tools/test_crossing.py` | Synthetic crossing-gate regression (incl. a centroid-vs-bottom-edge probe comparison) + annotated re-arm demo video |
+| `tools/test_tracker_cadence.py` | Regression: the centroid tracker returns exactly one OUT at every detection cadence 2–7 |
+| `tools/test_tracker_reacquire.py` | Regression: a track re-acquires after an occlusion gap instead of minting a new id |
 | `tools/set_camera_time.py` | Read/set a camera clock over ONVIF (Manual or NTP) |
 | `tools/onvif_media.py` | Inspect a camera's ONVIF encoder configs / profiles / RTSP URIs (diagnose a blurry substream) |
 | `tools/set_encoder.py` | Read/set a camera's ONVIF encoder (resolution/bitrate/GOP/fps/quality); dry-run by default |
