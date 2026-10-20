@@ -143,6 +143,7 @@ through `https://tracker.drnanoinc.com/terminal` without the Pi ever being reach
 | `tools/test_tracker_reacquire.py` | Regression: a track re-acquires after an occlusion gap instead of minting a new id |
 | `tools/set_camera_time.py` | Read/set a camera clock over ONVIF (Manual or NTP) |
 | `tools/onvif_media.py` | Inspect a camera's ONVIF encoder configs / profiles / RTSP URIs (diagnose a blurry substream) |
+| `tools/onvif_imaging.py` | Read/set a camera's ONVIF imaging settings (WDR/BLC/IR-cut/brightness/gain); dry-run by default |
 | `tools/set_encoder.py` | Read/set a camera's ONVIF encoder (resolution/bitrate/GOP/fps/quality); dry-run by default |
 | `web/` | SvelteKit (static SPA) dashboard + Bun ingest/reverse-terminal API (Drizzle + SQLite) |
 | `deploy/` | systemd units + env examples for the Pi |
@@ -434,7 +435,9 @@ A/B over 97 real crossing frames: PicoDet-S@320 found 97/97 (93 truck) ≈ NanoD
   clip the scene was almost black with blown-out headlights; lowering `TRACKER_DNN_CONF` to
   0.15–0.20 produced false `car` INs from the headlights and reflections. Keep the camera on
   B&W/IR through the night and enable WDR/BLC (with a capped shutter/gain) instead of
-  weakening the detector threshold; verify with a live night frame.
+  weakening the detector threshold; verify with a live night frame. We applied
+  `WideDynamicRange=ON, Level=50` to the dumper-site camera with
+  `tools/onvif_imaging.py` (BLC ON was ignored; `IrCutFilter` stays AUTO).
 - **The NVR can be the RTSP source (`"relay": false`) once Stream Encryption is off.** The
   Prama NVR (`192.168.225.150`) uses **MD5** RTSP Digest, so FFmpeg/OpenCV authenticate
   directly and `rtsp_relay` is not needed. Channel map: ch1 = `192.168.225.70` (embankment),

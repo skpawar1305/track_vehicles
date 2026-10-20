@@ -467,7 +467,12 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   B&W/IR; the likely failure is the day/night switch or headlight clipping. For a recurring
   night miss, keep the camera on B&W/IR through the night (IR-cut off/on) and enable WDR/BLC
   with a capped shutter/gain, then verify a live night frame with the production detector.
-  No tracker fix can recover a frame with no truck box.
+  No tracker fix can recover a frame with no truck box. On 2026-10-20 we set
+  **WideDynamicRange=ON, Level=50** on the dumper-site camera (`192.168.225.71`) via
+  `tools/onvif_imaging.py`; BLC=ON without a Level was ignored (read back OFF), and
+  `IrCutFilter` remains `AUTO` (the night image is already B&W). The camera's imaging service
+  is `https://192.168.225.71/onvif/Imaging` (device service `…/onvif/device_service`),
+  WS-UsernameToken; the NVR password in `config.json` also works for the camera.
 - **Truck-only fine-tune: `"detector": "picodet_libre"` (LibreYOLO export, RGB!).** A
   LibreYOLO `LibrePICODETs` fine-tune on COCO truck (6127 train / 250 val, 30 epochs) is
   staged at `models/picodet_s_320_truck/model.ncnn.{param,bin}`; `LibrePicoNcnn` decodes it
