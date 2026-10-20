@@ -430,6 +430,11 @@ A/B over 97 real crossing frames: PicoDet-S@320 found 97/97 (93 truck) ≈ NanoD
   return a loose box around a vehicle — or spanning two adjacent trucks — that IoU-NMS misses
   because its IoU with the tight box is low. Both paths drop any box mostly inside a
   higher-confidence one, so the tracker does not mint a phantom second track.
+- **A night miss is a camera/IR problem, not a threshold problem.** On the 2026-10-20 05:51
+  clip the scene was almost black with blown-out headlights; lowering `TRACKER_DNN_CONF` to
+  0.15–0.20 produced false `car` INs from the headlights and reflections. Keep the camera on
+  B&W/IR through the night and enable WDR/BLC (with a capped shutter/gain) instead of
+  weakening the detector threshold; verify with a live night frame.
 - **The NVR can be the RTSP source (`"relay": false`) once Stream Encryption is off.** The
   Prama NVR (`192.168.225.150`) uses **MD5** RTSP Digest, so FFmpeg/OpenCV authenticate
   directly and `rtsp_relay` is not needed. Channel map: ch1 = `192.168.225.70` (embankment),

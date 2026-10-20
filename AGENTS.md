@@ -460,6 +460,14 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   `dnn_imgsz` 416; the 1.5x-416 was ~15 fps) and the code default `hybrid` (motion-gated
   YOLO26n INT8 `320x320`) — switch `detector`/`dnn_model`/`dnn_imgsz` in `config.json`
   without editing the root-owned `tracker.env`.
+- **A night miss is a camera/IR problem, not a lower confidence threshold.** The 2026-10-20
+  05:51 `failed/ins/1.mp4` was almost black with blown-out headlights; at `dnn_conf`
+  0.15–0.20 the detector fired multiple false `car` INs from headlights and reflections, so
+  do not lower the global threshold. The same camera's live substream at 22:20 was clear
+  B&W/IR; the likely failure is the day/night switch or headlight clipping. For a recurring
+  night miss, keep the camera on B&W/IR through the night (IR-cut off/on) and enable WDR/BLC
+  with a capped shutter/gain, then verify a live night frame with the production detector.
+  No tracker fix can recover a frame with no truck box.
 - **Truck-only fine-tune: `"detector": "picodet_libre"` (LibreYOLO export, RGB!).** A
   LibreYOLO `LibrePICODETs` fine-tune on COCO truck (6127 train / 250 val, 30 epochs) is
   staged at `models/picodet_s_320_truck/model.ncnn.{param,bin}`; `LibrePicoNcnn` decodes it
