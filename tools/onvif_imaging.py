@@ -15,6 +15,11 @@ Credentials come from --password / --user, the TRACKER_CAM_PASSWORD env var, or
 a config.json ``stream_url`` (pass --config; it also auto-reads ./config.json
 and /opt/tracker/config.json). Never hard-coded.
 
+On this site ``config.json``'s ``stream_url`` is the NVR (192.168.225.150), while
+the counting camera's imaging service is on 192.168.225.71: pass
+``--host 192.168.225.71 --config /opt/tracker/config.json`` (the password is
+still read from the config).
+
     # read current settings + supported options
     python tools/onvif_imaging.py --config /opt/tracker/config.json
 
