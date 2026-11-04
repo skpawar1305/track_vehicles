@@ -259,8 +259,8 @@ bun run server.ts
 #      HOST=127.0.0.1, ENABLE_TERMINAL=1 (opt-in reverse shell at /terminal),
 #      CAM2=1 (second raw camera on /live; Pi sets TRACKER_CAM2_URL),
 #      WEB_ROOT (where the built SPA lives; default: <server.ts dir>/spa),
-#      TIMELINE_DAYS=15 (days the timeline offers; older days are neither listed
-#      nor served), RETENTION_DAYS=15 (prune the VPS's event row + images that far back)
+#      TIMELINE_DAYS=7 (days the timeline offers; older days are neither listed
+#      nor served), RETENTION_DAYS=7 (prune the VPS's event row + images that far back)
 ```
 
 Exposed through the Cloudflare Tunnel as `tracker.drnanoinc.com` → `http://localhost:3010`.
@@ -271,7 +271,7 @@ Pages (each its own URL; `/` redirects to `/live`):
 | Route | Contents |
 |-------|----------|
 | `/live` | MJPEG/snapshot live view + setup editor |
-| `/timeline` | Capture timeline: a horizontally scrollable strip of day squares (date + IN/OUT counts) for the last 15 days, oldest→newest with today auto-scrolled into view; `←`/`→` step a day, never into the future or past the 15-day window; days with no captures are still shown; the selected day's captures load on demand (deep-link `?day=YYYY-MM-DD` or `?d=`, clamped into the window; old `/calendar` links redirect here) |
+| `/timeline` | Capture timeline: a horizontally scrollable strip of day squares (date + IN/OUT counts) for the last 7 days, oldest→newest with today auto-scrolled into view; `←`/`→` step a day, never into the future or past the 7-day window; days with no captures are still shown; the selected day's captures load on demand (deep-link `?day=YYYY-MM-DD` or `?d=`, clamped into the window; old `/calendar` links redirect here) |
 | `/terminal` | Reverse web shell into the Pi (xterm.js); opt-in via `ENABLE_TERMINAL=1` |
 
 - **Timezone:** timestamps are stored in UTC but displayed and day-bucketed in **IST**

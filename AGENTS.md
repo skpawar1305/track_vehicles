@@ -254,11 +254,11 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   "Loading"). Don't re-embed the whole event list in the initial page — that was the old
   `/history` page (removed). The UI is a horizontal day-square strip (oldest→newest, today
   auto-scrolled in), `←`/`→` steps a day and never into the future or past the window; days
-  with zero captures are still shown. **The window is the last `TIMELINE_DAYS` days (15:
-  today + 14 prior) — older days are neither listed nor served.** `/api/events` filters
+  with zero captures are still shown. **The window is the last `TIMELINE_DAYS` days (7:
+  today + 6 prior) — older days are neither listed nor served.** `/api/events` filters
   `date(COALESCE(crossed_at,created_at))` to the window floor, and `/api/day` returns an empty
   day for anything older (or in the future), so a stale `?day=` deep link clamps to the oldest
-  square instead of resurrecting an expired day. `RETENTION_DAYS` (VPS side, default 15) prunes
+  square instead of resurrecting an expired day. `RETENTION_DAYS` (VPS side, default 7) prunes
   the matching event rows + images hourly; because IST day keys are always ≥ the UTC date the
   prune cutoff is derived from, the prune can never delete a day still inside the IST window.
   Each capture has an **Ignore** toggle (`POST /api/ignore`) that keeps the

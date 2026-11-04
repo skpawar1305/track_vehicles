@@ -8,9 +8,9 @@
 
   type DayData = { day: string; counts: { in: number; out: number }; events: DayEvent[] };
 
-  // The timeline window: today plus the previous 14 days. Mirrors TIMELINE_DAYS
+  // The timeline window: today plus the previous 6 days. Mirrors TIMELINE_DAYS
   // on the server (web/server.ts), which also refuses to serve older days.
-  const TIMELINE_DAYS = 15;
+  const TIMELINE_DAYS = 7;
   const oldestDay = () => dayKeyDaysAgo(TIMELINE_DAYS - 1);
 
   function initDay() {

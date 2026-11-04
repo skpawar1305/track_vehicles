@@ -31,7 +31,7 @@ const istNow = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 
 // The timeline only offers/serves the last TIMELINE_DAYS days (today plus
 // TIMELINE_DAYS-1 prior days). Older captures may still be on disk until
 // retention prunes them, but they are neither listed nor fetchable.
-const TIMELINE_DAYS = Number(process.env.TIMELINE_DAYS ?? 15);
+const TIMELINE_DAYS = Number(process.env.TIMELINE_DAYS ?? 7);
 const timelineFloor = () =>
   new Date(Date.now() + 330 * 60_000 - (TIMELINE_DAYS - 1) * 86_400_000).toISOString().slice(0, 10);
 
@@ -875,9 +875,9 @@ fetch('/api/config').then(function(r){return r.json();}).then(function(c){cfg=Ob
 }
 
 // ── Retention: events (and their images) older than RETENTION_DAYS auto-expire ──
-// Matches the TIMELINE_DAYS window: the dashboard stops offering a day at 15
+// Matches the TIMELINE_DAYS window: the dashboard stops offering a day at 7
 // days, and the VPS drops its copy (DB row + images) once it leaves the window.
-const RETENTION_DAYS = Number(process.env.RETENTION_DAYS ?? 15);
+const RETENTION_DAYS = Number(process.env.RETENTION_DAYS ?? 7);
 function pruneOldEvents() {
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 86400000).toISOString().slice(0, 10);
   const old = sqlite
