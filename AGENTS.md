@@ -254,13 +254,19 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   "Loading"). Don't re-embed the whole event list in the initial page — that was the old
   `/history` page (removed). The UI is a horizontal day-square strip (oldest→newest, today
   auto-scrolled in), `←`/`→` steps a day and never into the future or past the window; days
-  with zero captures are still shown. **The window is the last `TIMELINE_DAYS` days (7:
-  today + 6 prior) — older days are neither listed nor served.** `/api/events` filters
+  with zero captures are still shown. **The window is the last `TIMELINE_DAYS` days (14:
+  today + 13 prior) — older days are neither listed nor served.** `/api/events` filters
   `date(COALESCE(crossed_at,created_at))` to the window floor, and `/api/day` returns an empty
   day for anything older (or in the future), so a stale `?day=` deep link clamps to the oldest
-  square instead of resurrecting an expired day. `RETENTION_DAYS` (VPS side, default 7) prunes
-  the matching event rows + images hourly; because IST day keys are always ≥ the UTC date the
-  prune cutoff is derived from, the prune can never delete a day still inside the IST window.
+  square instead of resurrecting an expired day. VPS retention is **two-tier**: the
+  full-resolution `<id>.jpg` (main-stream snapshot, ~0.8 MB — the bulk of the disk) expires
+  after `FULL_IMAGE_DAYS` (7) and its `image_path` is nulled, so `/img/<id>` falls back to the
+  crossing substream frame (then the thumbnail); the event row + thumbnail + substream frame
+  (~0.2 MB) live for
+  `RETENTION_DAYS` (14, the timeline window) and are pruned hourly; because IST day keys are
+  always ≥ the UTC date the prune cutoff is derived from, the prune can never delete a day
+  still inside the IST window. The Pi's own `TRACKER_RETENTION_DAYS` is a separate offline
+  buffer, not this window.
   Each capture has an **Ignore** toggle (`POST /api/ignore`) that keeps the
   card in the gallery (dimmed) but drops it from every IN/OUT total (day badge, tabs, header,
   `/api/config`); the toggle is optimistic (in-place, no gallery rebuild, no scroll jump).

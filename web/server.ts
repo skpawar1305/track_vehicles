@@ -29,9 +29,10 @@ const istDay = (col: string) => `date(${col}, '${IST_SHIFT}')`;
 const istNow = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
 
 // The timeline only offers/serves the last TIMELINE_DAYS days (today plus
-// TIMELINE_DAYS-1 prior days). Older captures may still be on disk until
-// retention prunes them, but they are neither listed nor fetchable.
-const TIMELINE_DAYS = Number(process.env.TIMELINE_DAYS ?? 7);
+// TIMELINE_DAYS-1 prior days). Older captures are pruned in two tiers: the
+// full-resolution `<id>.jpg` goes first (FULL_IMAGE_DAYS), then the row with its
+// thumbnail + substream frame (RETENTION_DAYS).
+const TIMELINE_DAYS = Number(process.env.TIMELINE_DAYS ?? 14);
 const timelineFloor = () =>
   new Date(Date.now() + 330 * 60_000 - (TIMELINE_DAYS - 1) * 86_400_000).toISOString().slice(0, 10);
 
@@ -276,20 +277,24 @@ function unauthorized() {
 async function serveImage(id: string, variant: "full" | "thumb" | "sub") {
   try {
     const row = db.select().from(events).where(eq(events.id, id)).get();
-    const rel = variant === "thumb" ? row?.thumbPath
-              : variant === "sub" ? row?.subPath
-              : row?.imagePath;
-    if (!rel) return new Response("not found", { status: 404 });
+    // The full image expires before the rest of the capture (FULL_IMAGE_DAYS <
+    // RETENTION_DAYS), so /img/<id> for an old day falls back to the crossing
+    // substream frame (full 640x360), then the thumbnail, instead of 404ing.
+    const candidates = variant === "full"
+      ? [row?.imagePath, row?.subPath, row?.thumbPath]
+      : variant === "thumb" ? [row?.thumbPath]
+      : [row?.subPath];
     const base = resolve(CAPTURES_DIR);
-    const full = resolve(base, rel);
-    // Defence in depth: never serve outside the captures dir even if the DB
-    // row is tampered with.
-    if (full !== base && !full.startsWith(base + "/")) {
-      return new Response("not found", { status: 404 });
+    for (const rel of candidates) {
+      if (!rel) continue;
+      const full = resolve(base, rel);
+      // Defence in depth: never serve outside the captures dir even if the DB
+      // row is tampered with.
+      if (full !== base && !full.startsWith(base + "/")) continue;
+      const file = Bun.file(full);
+      if (await file.exists()) return new Response(file);
     }
-    const file = Bun.file(full);
-    if (!(await file.exists())) return new Response("not found", { status: 404 });
-    return new Response(file);
+    return new Response("not found", { status: 404 });
   } catch (e) {
     console.error("[tracker-web] serveImage failed", e);
     return new Response("not found", { status: 404 });
@@ -874,10 +879,32 @@ fetch('/api/config').then(function(r){return r.json();}).then(function(c){cfg=Ob
 </body></html>`;
 }
 
-// ── Retention: events (and their images) older than RETENTION_DAYS auto-expire ──
-// Matches the TIMELINE_DAYS window: the dashboard stops offering a day at 7
-// days, and the VPS drops its copy (DB row + images) once it leaves the window.
-const RETENTION_DAYS = Number(process.env.RETENTION_DAYS ?? 7);
+// ── Two-tier retention ──────────────────────────────────────────────────
+// The full-resolution `<id>.jpg` (the camera's main-stream snapshot, ~0.8 MB) is
+// the expensive one: it expires after FULL_IMAGE_DAYS and its `image_path` is
+// nulled, so `/img/<id>` falls back to the thumbnail. The rest of the capture —
+// row + thumbnail + crossing substream frame (~0.2 MB together) — lives for
+// RETENTION_DAYS, which is also the TIMELINE_DAYS window.
+const FULL_IMAGE_DAYS = Number(process.env.FULL_IMAGE_DAYS ?? 7);
+const RETENTION_DAYS = Number(process.env.RETENTION_DAYS ?? 14);
+
+// Drop just the high-quality image; the event and its smaller frames stay.
+function pruneFullImages() {
+  const cutoff = new Date(Date.now() - FULL_IMAGE_DAYS * 86400000).toISOString().slice(0, 10);
+  const old = sqlite
+    .query(`SELECT image_path FROM events
+            WHERE image_path IS NOT NULL AND date(COALESCE(crossed_at, created_at)) < ?`)
+    .all(cutoff) as { image_path: string }[];
+  if (!old.length) return 0;
+  for (const r of old) {
+    try { unlinkSync(`${CAPTURES_DIR}/${r.image_path}`); } catch {}
+  }
+  sqlite.query(`UPDATE events SET image_path = NULL
+                WHERE image_path IS NOT NULL AND date(COALESCE(crossed_at, created_at)) < ?`).run(cutoff);
+  console.log(`[tracker-web] retention: dropped ${old.length} full images older than ${cutoff}`);
+  return old.length;
+}
+
 function pruneOldEvents() {
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 86400000).toISOString().slice(0, 10);
   const old = sqlite
@@ -894,7 +921,8 @@ function pruneOldEvents() {
   console.log(`[tracker-web] retention: pruned ${old.length} events older than ${cutoff}`);
   return old.length;
 }
-setInterval(pruneOldEvents, 3_600_000);
+setInterval(() => { pruneFullImages(); pruneOldEvents(); }, 3_600_000);
+pruneFullImages();
 pruneOldEvents();
 
 Bun.serve<TermData>({
