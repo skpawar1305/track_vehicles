@@ -28,6 +28,13 @@ const IST_SHIFT = "+330 minutes";
 const istDay = (col: string) => `date(${col}, '${IST_SHIFT}')`;
 const istNow = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
 
+// The timeline only offers/serves the last TIMELINE_DAYS days (today plus
+// TIMELINE_DAYS-1 prior days). Older captures may still be on disk until
+// retention prunes them, but they are neither listed nor fetchable.
+const TIMELINE_DAYS = Number(process.env.TIMELINE_DAYS ?? 15);
+const timelineFloor = () =>
+  new Date(Date.now() + 330 * 60_000 - (TIMELINE_DAYS - 1) * 86_400_000).toISOString().slice(0, 10);
+
 mkdirSync(`${CAPTURES_DIR}/thumb`, { recursive: true });
 mkdirSync(`${CAPTURES_DIR}/sub`, { recursive: true });
 
@@ -332,8 +339,8 @@ function loadDayStats() {
   const dayExpr = istDay("COALESCE(crossed_at, created_at)");
   const days = sqlite
     .query(`SELECT ${dayExpr} AS d, SUM(direction='in') AS inn, SUM(direction='out') AS outt
-            FROM events WHERE ignored = 0 GROUP BY d`)
-    .all() as { d: string; inn: number; outt: number }[];
+            FROM events WHERE ignored = 0 AND ${dayExpr} >= ? GROUP BY d`)
+    .all(timelineFloor()) as { d: string; inn: number; outt: number }[];
   return Object.fromEntries(days.map((d) => [d.d, { in: d.inn ?? 0, out: d.outt ?? 0 }]));
 }
 
@@ -369,7 +376,7 @@ function istTodayCounts() {
 
 function dashboard(view: "live" | "timeline", initialDay: string | null) {
   const dayStats = loadDayStats();
-  const init = initialDay && /^\d{4}-\d{2}-\d{2}$/.test(initialDay) ? initialDay : null;
+  const init = initialDay && /^\d{4}-\d{2}-\d{2}$/.test(initialDay) && initialDay >= timelineFloor() ? initialDay : null;
   const J = (o: unknown) => JSON.stringify(o).replace(/</g, "\\u003c");
   const cam2Panel = CAM2
     ? `<div class="feed hidden" id="cam2"><div class="feedtag"><span class="d"></span>Camera 2</div><div class="player"><img id="snap_cam2" alt="camera 2"></div></div>`
@@ -571,6 +578,7 @@ img{max-width:100%}
 let DAYS=${J(dayStats)};
 const INIT=${J(init)};
 const VIEW=${J(view)};
+const FLOOR=${J(timelineFloor())};   // oldest day the timeline offers (TIMELINE_DAYS window)
 </script>
 <script>
 (function(){
@@ -656,13 +664,13 @@ function ymd(y,m,d){return y+'-'+pad(m+1)+'-'+pad(d);}
 var dayStrip=document.getElementById('dayStrip');
 // All day keys on the dashboard are IST (UTC+5:30), matching the server.
 function todayKey(){return new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Kolkata'});}
-// Day squares: the last 30 days (the retention window) plus any day that has
+// Day squares: the last TIMELINE_DAYS days plus any day in that window that has
 // data, so days with zero captures are still shown — just without badges.
 function dayKeys(){
   var set={},today=todayKey(),b=new Date(today+'T00:00:00');
-  for(var i=0;i<30;i++){var d=new Date(b.getTime()-i*86400000);set[ymd(d.getFullYear(),d.getMonth(),d.getDate())]=1;}
-  Object.keys(DAYS).forEach(function(k){if(k<=today)set[k]=1;});
-  if(selDay)set[selDay]=1;
+  for(var i=0;i<${TIMELINE_DAYS};i++){var d=new Date(b.getTime()-i*86400000);set[ymd(d.getFullYear(),d.getMonth(),d.getDate())]=1;}
+  Object.keys(DAYS).forEach(function(k){if(k>=FLOOR&&k<=today)set[k]=1;});
+  if(selDay&&selDay>=FLOOR)set[selDay]=1;
   return Object.keys(set).sort();
 }
 function renderStrip(){
@@ -681,9 +689,9 @@ function renderStrip(){
   if(sel&&sel.scrollIntoView)sel.scrollIntoView({block:'nearest',inline:'center'});
 }
 function selectDay(k){selDay=k;renderStrip();renderCalDay();}
-// Move one day at a time; never past today.
+// Move one day at a time; never past today or before the TIMELINE_DAYS window.
 function shiftDay(n){var b=new Date((selDay||todayKey())+'T00:00:00');b.setDate(b.getDate()+n);
-  var k=ymd(b.getFullYear(),b.getMonth(),b.getDate());if(k>todayKey())return;
+  var k=ymd(b.getFullYear(),b.getMonth(),b.getDate());if(k>todayKey()||k<FLOOR)return;
   selectDay(k);}
 document.addEventListener('keydown',function(e){if(e.target&&/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;
   if(e.key==='ArrowLeft'){shiftDay(-1);e.preventDefault();}else if(e.key==='ArrowRight'){shiftDay(1);e.preventDefault();}});
@@ -867,7 +875,9 @@ fetch('/api/config').then(function(r){return r.json();}).then(function(c){cfg=Ob
 }
 
 // ── Retention: events (and their images) older than RETENTION_DAYS auto-expire ──
-const RETENTION_DAYS = Number(process.env.RETENTION_DAYS ?? 30);
+// Matches the TIMELINE_DAYS window: the dashboard stops offering a day at 15
+// days, and the VPS drops its copy (DB row + images) once it leaves the window.
+const RETENTION_DAYS = Number(process.env.RETENTION_DAYS ?? 15);
 function pruneOldEvents() {
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 86400000).toISOString().slice(0, 10);
   const old = sqlite
@@ -1122,6 +1132,11 @@ Bun.serve<TermData>({
     if (url.pathname === "/api/day") {
       const day = url.searchParams.get("d") ?? "";
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return new Response("bad day", { status: 400 });
+      // Outside the timeline window (older than TIMELINE_DAYS, or in the
+      // future) there is nothing to show, even if rows still exist.
+      if (day < timelineFloor() || day > istNow()) {
+        return Response.json({ day, counts: { in: 0, out: 0 }, events: [] });
+      }
       return Response.json(loadDay(day));
     }
 

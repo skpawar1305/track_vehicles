@@ -5,6 +5,12 @@ export function pad(n: number) { return String(n).padStart(2, "0"); }
 export function ymd(y: number, m: number, d: number) { return `${y}-${pad(m + 1)}-${pad(d)}`; }
 export function todayKey() { return new Date().toLocaleDateString("sv-SE", IST); }
 
+// Day key `n` days before today (IST), so a timeline of N days spans
+// dayKeyDaysAgo(N - 1) .. todayKey().
+export function dayKeyDaysAgo(n: number) {
+  return new Date(Date.now() + 330 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+}
+
 export function dayLabel(k: string) {
   if (k === todayKey()) return "Today";
   const y = new Date(Date.now() - 86_400_000).toLocaleDateString("sv-SE", IST);

@@ -3,14 +3,21 @@
   import { get } from "svelte/store";
   import { page } from "$app/state";
   import { days, todayCounts } from "#lib/stores.js";
-  import { dayLabel, fmtTimeParts, todayKey, ymd } from "#lib/format.js";
+  import { dayKeyDaysAgo, dayLabel, fmtTimeParts, todayKey, ymd } from "#lib/format.js";
   import type { DayEvent } from "#lib/types.js";
 
   type DayData = { day: string; counts: { in: number; out: number }; events: DayEvent[] };
 
+  // The timeline window: today plus the previous 14 days. Mirrors TIMELINE_DAYS
+  // on the server (web/server.ts), which also refuses to serve older days.
+  const TIMELINE_DAYS = 15;
+  const oldestDay = () => dayKeyDaysAgo(TIMELINE_DAYS - 1);
+
   function initDay() {
     const d = page.url.searchParams.get("day") ?? page.url.searchParams.get("d");
-    return d && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : todayKey();
+    const k = d && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : todayKey();
+    if (k < oldestDay()) return oldestDay();
+    return k > todayKey() ? todayKey() : k;
   }
 
   let selDay = $state(initDay());
@@ -25,17 +32,19 @@
     current ? current.events.filter((e) => e.dir.toLowerCase() === dir) : [],
   );
 
-  // Day squares: the last 30 days (retention window) plus any day with data.
+  // Day squares: the last TIMELINE_DAYS days plus any day in that window with
+  // data (zero-capture days are still shown, just without badges).
   const strip = $derived.by(() => {
     const set: Record<string, 1> = {};
     const today = todayKey();
+    const floor = oldestDay();
     const b = new Date(today + "T00:00:00");
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < TIMELINE_DAYS; i++) {
       const d = new Date(b.getTime() - i * 86_400_000);
       set[ymd(d.getFullYear(), d.getMonth(), d.getDate())] = 1;
     }
-    Object.keys($days).forEach((k) => { if (k <= today) set[k] = 1; });
-    set[selDay] = 1;
+    Object.keys($days).forEach((k) => { if (k >= floor && k <= today) set[k] = 1; });
+    if (selDay >= floor && selDay <= today) set[selDay] = 1;
     return Object.keys(set).sort();
   });
 
@@ -63,7 +72,7 @@
     const b = new Date((selDay || todayKey()) + "T00:00:00");
     b.setDate(b.getDate() + n);
     const k = ymd(b.getFullYear(), b.getMonth(), b.getDate());
-    if (k > todayKey()) return;
+    if (k > todayKey() || k < oldestDay()) return; // stay inside the timeline window
     selectDay(k);
   }
 
