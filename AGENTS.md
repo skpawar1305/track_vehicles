@@ -420,6 +420,35 @@ Failures are expected; silent failures are bugs. Keep these true everywhere:
   This is *placement-independent*, unlike moving the line, so it survives a parked vehicle
   anywhere. (A track "hand-off" that inherits a lost track's crossing when a new track is born
   past the line was tried and **over-counts** — left disabled at `handoff_frac=0`.)
+- **A *fixed* probe edge is only the leading edge in one direction — the other flow confirms on
+  its tail and can run out of runway.** `"probe": "left"` was picked for the right→left OUT
+  flow above, where `bbox[0]` leads. For a left→right **IN** the left edge is the *trailing*
+  edge, so the IN only confirms after the whole vehicle *plus* `confirm_frac` (0.2 → 72 px on
+  360p) has passed the line. On this camera the line sits at x≈0.55 and the frame/ROI ends at
+  ~0.99, so a 170 px dumper must travel ~90 % of its remaining runway to confirm — every
+  counted IN's substream frame shows the truck jammed against the right edge, rear at ~0.69 of
+  the width (`/sub/<id>` for `…_id1540_in`, `…_id1526_in`, 2026-11-05). Anything that delays
+  the box or widens its trailing edge by ~70 px at that moment — dust behind a tipper, one
+  missed detection, the ROI clipping the box at the right edge — silently drops the IN: no
+  event row, no `rearm_block`/`dedup_block` counter (2026-11-05 08:53:36 yellow dumper,
+  `failed/ins/3.mp4`, while the white OUT trucks at 08:50:58 and 08:55:58 counted; it replays
+  to exactly 1 IN through the production detector/gate at 640×360, 854×480 and substream
+  bitrates, so it is a knife-edge, not a detector bug). `tools/bench_tracker_clips.py` pins
+  `failed/ins/3.mp4` at 1 IN.
+- **Do not fix the IN knife-edge by moving the line — the OUT flow owns the placement.**
+  OUTs confirm on their *leading* edge, so their commit and their proof framing barely move
+  with the line (measured on `failed/outs/1,2`: OUT at 11.3 s / 7.5 s at x≈0.60 vs 11.3 s /
+  6.8 s at 0.65, truck still 0.45–0.92 / 0.46–0.70 of the width at the commit frame), while
+  every px the line moves *left* catches the OUT snapshot further along the road — and OUT
+  evidence is the priority on this site. A left shift to x≈0.45 (IN commit 8.9 s → 7.8 s,
+  ~2.2 s of runway instead of ~0.7 s) was tried and reverted for exactly that reason; the line
+  stays at 0.5966/0.5428. Right of ~0.62 is worse still: the IN box clips at the frame edge
+  and at 0.70 the gate manufactures an IN/OUT pair on `outs/2`. The durable fix is a
+  direction-aware *leading* edge (`bbox[2]` when the track moves toward +dist, `bbox[0]` the
+  other way) — a naive per-frame version flips the probe on box jitter and over-counts on a
+  loitering vehicle (measured: dozens of IN/OUT pairs on `ins/2` and `outs/1`), so it needs a
+  hysteretic direction estimate and a re-run of all four clips plus `tools/test_crossing.py`
+  before it ships.
 - **A stream freeze must not drop the track — or it silently loses a count.**
   If the stream blocks for seconds, the vehicle moves far more than one frame's worth by the
   time frames resume; a raw-box IoU match then fails, a *new* track id is minted already past

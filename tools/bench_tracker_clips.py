@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay the three diagnostic clips through the production detector and gate,
+"""Replay the diagnostic clips through the production detector and gate,
 comparing the centroid tracker with the vendored OC-SORT.
 
 Detector output is cached once per clip, then replayed at several detection
@@ -42,16 +42,19 @@ CLIPS = [
     "failed/outs/1.mp4",
     "failed/outs/2.mp4",
     "failed/ins/2.mp4",
+    "failed/ins/3.mp4",
 ]
 EXPECTED = {
     "failed/outs/1.mp4": {"IN": 0, "OUT": 1},
     "failed/outs/2.mp4": {"IN": 0, "OUT": 1},
     "failed/ins/2.mp4": {"IN": 1, "OUT": 1},
+    "failed/ins/3.mp4": {"IN": 1, "OUT": 0},
 }
 EXPECTED_IDS = {
     "failed/outs/1.mp4": 1,
     "failed/outs/2.mp4": 1,
     "failed/ins/2.mp4": 2,
+    "failed/ins/3.mp4": 1,
 }
 
 
